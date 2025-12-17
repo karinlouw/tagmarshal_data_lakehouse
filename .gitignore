@@ -1,6 +1,43 @@
 # Python
 __pycache__/
 *.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# dbt
+target/
+dbt_packages/
+logs/
+.user.yml
+
+# Airflow (local)
+orchestration/airflow/logs/
+orchestration/airflow/plugins/__pycache__/
+
+# Local env files (keep config/*.env tracked by design; ignore accidental root .env)
+.env
+
+# Data / scratch
+data/
+tmp/
+*.parquet
+*.csv
+
+# Python
+__pycache__/
+*.py[cod]
 *$py.class
 *.so
 .Python

@@ -1,0 +1,31 @@
+version: 2
+
+sources:
+  - name: silver
+    database: iceberg
+    schema: silver
+    tables:
+      - name: fact_telemetry_event
+        description: "Silver long-format telemetry events (Iceberg)."
+        columns:
+          - name: round_id
+            tests:
+              - not_null
+          - name: course_id
+            tests:
+              - not_null
+          - name: fix_timestamp
+            tests:
+              - not_null
+          - name: latitude
+            tests:
+              - dbt_utils.accepted_range:
+                  min_value: -90
+                  max_value: 90
+          - name: longitude
+            tests:
+              - dbt_utils.accepted_range:
+                  min_value: -180
+                  max_value: 180
+
+

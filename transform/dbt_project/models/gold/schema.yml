@@ -1,0 +1,28 @@
+version: 2
+
+models:
+  - name: pace_summary_by_round
+    description: "Round-level pace summary computed from Silver telemetry."
+    columns:
+      - name: round_id
+        tests: [not_null]
+      - name: course_id
+        tests: [not_null]
+
+  - name: signal_quality_rounds
+    description: "Signal quality rates per round based on projected/problem flags."
+    columns:
+      - name: round_id
+        tests: [not_null]
+      - name: course_id
+        tests: [not_null]
+
+  - name: device_health_errors
+    description: "Simple battery-based device health flags derived from telemetry."
+    columns:
+      - name: round_id
+        tests: [not_null]
+      - name: course_id
+        tests: [not_null]
+
+

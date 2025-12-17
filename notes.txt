@@ -1,0 +1,7 @@
+1. At bronze ingest, add ingestion summary at the end.
+2. Ingestion watermark
+3. In terminal, add time it took to ingest in minutes + seconds, file size (if low operational cost to get)
+    and the shape of the csv file. Also add path where it is written to.
+4. Validate ingestion (row count, filesize)
+5. Append to tables with the same filenames.
+6. view data ib a database

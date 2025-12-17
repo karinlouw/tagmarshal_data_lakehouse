@@ -1,0 +1,194 @@
+name: tagmarshal-lakehouse
+
+services:
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${TM_S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${TM_S3_SECRET_KEY:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/ready" ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      TM_S3_ACCESS_KEY: ${TM_S3_ACCESS_KEY:-minioadmin}
+      TM_S3_SECRET_KEY: ${TM_S3_SECRET_KEY:-minioadmin}
+      TM_BUCKET_LANDING: ${TM_BUCKET_LANDING:-tm-lakehouse-landing-zone}
+      TM_BUCKET_SOURCE: ${TM_BUCKET_SOURCE:-tm-lakehouse-source-store}
+      TM_BUCKET_SERVE: ${TM_BUCKET_SERVE:-tm-lakehouse-serve}
+      TM_BUCKET_QUARANTINE: ${TM_BUCKET_QUARANTINE:-tm-lakehouse-quarantine}
+      TM_BUCKET_OBSERVABILITY: ${TM_BUCKET_OBSERVABILITY:-tm-lakehouse-observability}
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        mc alias set local http://minio:9000 $$TM_S3_ACCESS_KEY $$TM_S3_SECRET_KEY &&
+        mc mb -p local/$$TM_BUCKET_LANDING || true &&
+        mc mb -p local/$$TM_BUCKET_SOURCE || true &&
+        mc mb -p local/$$TM_BUCKET_SERVE || true &&
+        mc mb -p local/$$TM_BUCKET_QUARANTINE || true &&
+        mc mb -p local/$$TM_BUCKET_OBSERVABILITY || true &&
+        echo "[SUCCESS] MinIO buckets created:"
+        mc ls local/
+
+  # Iceberg REST Catalog - configured for MinIO
+  iceberg-rest:
+    image: tabulario/iceberg-rest:latest
+    container_name: iceberg-rest
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      # Default warehouse location (Silver)
+      CATALOG_WAREHOUSE: ${TM_ICEBERG_WAREHOUSE_SILVER:-s3://tm-lakehouse-source-store/warehouse}
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: ${TM_S3_ENDPOINT:-http://minio:9000}
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      AWS_REGION: ${TM_S3_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${TM_S3_ACCESS_KEY:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${TM_S3_SECRET_KEY:-minioadmin}
+    ports:
+      - "8181:8181"
+
+  # Spark runtime for ETL
+  spark:
+    image: apache/spark:3.5.0
+    container_name: spark
+    environment:
+      SPARK_MASTER_HOST: spark
+      SPARK_NO_DAEMONIZE: "true"
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - /opt/spark/sbin/start-master.sh && tail -f /opt/spark/logs/*
+    ports:
+      - "7077:7077"
+      - "8082:8080"
+    volumes:
+      - ./jobs:/opt/tagmarshal/jobs:ro
+      - ./data:/opt/tagmarshal/input:ro
+
+  spark-worker:
+    image: apache/spark:3.5.0
+    container_name: spark-worker
+    depends_on:
+      - spark
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - sleep 5 && /opt/spark/sbin/start-worker.sh spark://spark:7077 && tail -f /opt/spark/logs/*
+    volumes:
+      - ./jobs:/opt/tagmarshal/jobs:ro
+      - ./data:/opt/tagmarshal/input:ro
+
+  # Trino for interactive SQL against Iceberg
+  trino:
+    image: trinodb/trino:455
+    container_name: trino
+    depends_on:
+      - iceberg-rest
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./docker/trino/etc:/etc/trino:ro
+
+  postgres:
+    image: postgres:16
+    container_name: airflow-postgres
+    environment:
+      POSTGRES_USER: ${TM_POSTGRES_USER:-airflow}
+      POSTGRES_PASSWORD: ${TM_POSTGRES_PASSWORD:-airflow}
+      POSTGRES_DB: ${TM_POSTGRES_DB:-airflow}
+    ports:
+      - "5432:5432"
+    volumes:
+      - airflow_pg:/var/lib/postgresql/data
+
+  airflow:
+    image: apache/airflow:2.10.3-python3.11
+    container_name: airflow
+    depends_on:
+      - postgres
+      - spark
+      - trino
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${TM_POSTGRES_USER:-airflow}:${TM_POSTGRES_PASSWORD:-airflow}@postgres:5432/${TM_POSTGRES_DB:-airflow}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+      PYTHONWARNINGS: "ignore::FutureWarning,ignore::UserWarning"
+      AIRFLOW__WEBSERVER__RATE_LIMIT_ENABLED: "false"
+      PYTHONPATH: /opt/tagmarshal/jobs/spark/lib
+      # Airflow admin user
+      TM_AIRFLOW_ADMIN_USERNAME: ${TM_AIRFLOW_ADMIN_USERNAME:-admin}
+      TM_AIRFLOW_ADMIN_PASSWORD: ${TM_AIRFLOW_ADMIN_PASSWORD:-admin}
+      TM_AIRFLOW_ADMIN_EMAIL: ${TM_AIRFLOW_ADMIN_EMAIL:-admin@example.com}
+      # Tagmarshal env vars
+      TM_ENV: ${TM_ENV:-local}
+      TM_BUCKET_LANDING: ${TM_BUCKET_LANDING:-tm-lakehouse-landing-zone}
+      TM_BUCKET_SOURCE: ${TM_BUCKET_SOURCE:-tm-lakehouse-source-store}
+      TM_BUCKET_SERVE: ${TM_BUCKET_SERVE:-tm-lakehouse-serve}
+      TM_BUCKET_QUARANTINE: ${TM_BUCKET_QUARANTINE:-tm-lakehouse-quarantine}
+      TM_BUCKET_OBSERVABILITY: ${TM_BUCKET_OBSERVABILITY:-tm-lakehouse-observability}
+      TM_S3_ENDPOINT: ${TM_S3_ENDPOINT:-http://minio:9000}
+      TM_S3_REGION: ${TM_S3_REGION:-us-east-1}
+      TM_S3_ACCESS_KEY: ${TM_S3_ACCESS_KEY:-minioadmin}
+      TM_S3_SECRET_KEY: ${TM_S3_SECRET_KEY:-minioadmin}
+      TM_S3_FORCE_PATH_STYLE: ${TM_S3_FORCE_PATH_STYLE:-true}
+      TM_ICEBERG_CATALOG_TYPE: ${TM_ICEBERG_CATALOG_TYPE:-rest}
+      TM_ICEBERG_REST_URI: ${TM_ICEBERG_REST_URI:-http://iceberg-rest:8181}
+      TM_ICEBERG_WAREHOUSE_SILVER: ${TM_ICEBERG_WAREHOUSE_SILVER:-s3://tm-lakehouse-source-store/warehouse}
+      TM_ICEBERG_WAREHOUSE_GOLD: ${TM_ICEBERG_WAREHOUSE_GOLD:-s3://tm-lakehouse-serve/warehouse}
+      TM_DB_SILVER: ${TM_DB_SILVER:-silver}
+      TM_DB_GOLD: ${TM_DB_GOLD:-gold}
+      TM_OBS_PREFIX: ${TM_OBS_PREFIX:-}
+      TM_LOCAL_INPUT_DIR: ${TM_LOCAL_INPUT_DIR:-/opt/tagmarshal/input}
+      # Registry database
+      TM_POSTGRES_HOST: postgres
+      TM_POSTGRES_PORT: "5432"
+      TM_POSTGRES_DB: ${TM_POSTGRES_DB:-airflow}
+      TM_POSTGRES_USER: ${TM_POSTGRES_USER:-airflow}
+      TM_POSTGRES_PASSWORD: ${TM_POSTGRES_PASSWORD:-airflow}
+    volumes:
+      - ./orchestration/airflow/dags:/opt/airflow/dags
+      - ./orchestration/airflow/logs:/opt/airflow/logs
+      - ./orchestration/airflow/plugins:/opt/airflow/plugins
+      - ./orchestration/airflow/requirements.txt:/opt/airflow/requirements.txt:ro
+      - ./jobs:/opt/tagmarshal/jobs:ro
+      - ./transform:/opt/tagmarshal/transform
+      - ./data:/opt/tagmarshal/input:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "8080:8080"
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        pip install --no-cache-dir -r /opt/airflow/requirements.txt 2>/dev/null &&
+        sleep 5 &&
+        airflow db init 2>&1 | grep -v "FutureWarning\|DeprecationWarning" &&
+        airflow users create --username $$TM_AIRFLOW_ADMIN_USERNAME --password $$TM_AIRFLOW_ADMIN_PASSWORD --firstname admin --lastname admin --role Admin --email $$TM_AIRFLOW_ADMIN_EMAIL 2>&1 | grep -v "already exist\|FutureWarning" || true &&
+        echo "[SUCCESS] Airflow initialized. Starting webserver and scheduler..." &&
+        airflow webserver & exec airflow scheduler
+
+volumes:
+  minio_data:
+  airflow_pg:
