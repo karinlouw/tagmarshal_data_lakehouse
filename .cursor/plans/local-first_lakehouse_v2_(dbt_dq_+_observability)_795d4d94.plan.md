@@ -73,7 +73,7 @@ todos:
 
 ## Repo scaffold (greenfield)
 
-The repo currently contains only your design doc (`[local-first_aws_lakehouse_(geospatial)_v2_updated.md](/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/local-first_aws_lakehouse_\\\\\\\\\\\(geospatial)_v2_updated.md)`), so we’ll create everything below.
+The repo currently contains only your design doc (`[local-first_aws_lakehouse_(geospatial)_v2_updated.md](/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/local-first_aws_lakehouse_\\\\\\\\\\\\(geospatial)_v2_updated.md)`), so we’ll create everything below.
 
 - **Local stack**: [`docker-compose.yml`](/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/docker-compose.yml) (MinIO, Spark, Iceberg REST catalog, Trino, Airflow + Postgres)
 - **Orchestration (Airflow)**: [`orchestration/airflow/`](/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/orchestration/airflow) (DAGs + Docker config)
@@ -238,4 +238,3 @@ flowchart LR
 - **Orchestration**: Airflow triggers Glue jobs + dbt runs against Athena (`dbt-athena`).
 - Deliver a checklist for:
 - Glue job packaging + parameters
-- IAM role permissions

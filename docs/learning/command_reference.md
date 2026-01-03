@@ -108,6 +108,26 @@ just trino-status                                             # Check health
 - MinIO: http://localhost:9001 (minioadmin/minioadmin)
 - Trino: http://localhost:8081
 - Spark: http://localhost:8082
+- Superset: http://localhost:8088 (admin/admin)
+
+---
+
+## 📊 Superset (Dashboards)
+
+| Command | Description |
+|---------|-------------|
+| `just superset` | Open Superset in browser |
+| `just superset-status` | Check if Superset is ready |
+| `just superset-trino-connection` | Show connection string for Trino |
+
+**Setup:**
+1. Run `just superset-trino-connection` to see the connection string
+2. In Superset: Settings → Database Connections → + Database
+3. Select Trino, paste: `trino://trino@trino:8080/iceberg`
+
+**Available Schemas:**
+- `silver` - Raw telemetry (fact_telemetry_event)
+- `gold` - Analytics tables (pace_summary, data_quality, etc.)
 
 ---
 
@@ -189,6 +209,25 @@ just up    # Start fresh with empty databases
 
 ---
 
+## 📊 Dashboard Commands
+
+The Streamlit dashboard provides a visual interface for data quality analysis.
+
+| Command | Description |
+|---------|-------------|
+| `just dashboard-install` | Install Python dependencies for dashboard |
+| `just dashboard` | Run dashboard (foreground, shows logs) |
+| `just dashboard-bg` | Run dashboard in background |
+| `just dashboard-stop` | Stop background dashboard |
+
+**Prerequisites:**
+- Trino must be running (`just trino-status`)
+- Gold models must be built (`just gold`)
+
+**Access:** http://localhost:8501
+
+---
+
 ## 📁 Quick Reference Card
 
 ```
@@ -200,6 +239,7 @@ just up    # Start fresh with empty databases
 │  just silver-all            # Process to Silver                 │
 │  just gold                  # Build analytics                   │
 │  just trino                 # Query results                     │
+│  just dashboard             # Data quality dashboard            │
 │  just down                  # Stop when done                    │
 ├─────────────────────────────────────────────────────────────────┤
 │                     TROUBLESHOOTING                             │
@@ -260,6 +300,13 @@ just up                  # Start fresh
 just bronze-upload-all   # Re-upload data
 just silver-all          # Re-process
 just gold                # Rebuild analytics
+```
+
+### Client Demo (Data Quality Dashboard)
+```bash
+just trino-status        # Ensure Trino is ready
+just dashboard-install   # First time: install dependencies
+just dashboard           # Launch dashboard at http://localhost:8501
 ```
 
 ---

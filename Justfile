@@ -138,10 +138,11 @@ ui:
   @echo ""
   @echo "🌐 SERVICE URLS"
   @echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  @echo "  Airflow   http://localhost:8080"
+  @echo "  Airflow   http://localhost:8080    (admin/admin)"
   @echo "  Trino     http://localhost:8081"
   @echo "  Spark     http://localhost:8082"
-  @echo "  MinIO     http://localhost:9001"
+  @echo "  MinIO     http://localhost:9001    (minioadmin/minioadmin)"
+  @echo "  Superset  http://localhost:8088    (admin/admin)"
   @echo ""
 
 # Open interactive Trino SQL shell
@@ -180,6 +181,120 @@ trino-status:
     echo "$INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'    Version: {d[\"nodeVersion\"][\"version\"]}'); print(f'    Starting: {d[\"starting\"]}'); print(f'    Uptime: {d[\"uptime\"]}')"
   fi
   echo ""
+
+# ============================================
+# SUPERSET COMMANDS
+# ============================================
+
+# Check if Superset is ready
+superset-status:
+  #!/usr/bin/env bash
+  echo ""
+  echo "📊 SUPERSET STATUS"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  if docker ps | grep -q "superset"; then
+    if curl -s -o /dev/null -w "%{http_code}" http://localhost:8088/health 2>/dev/null | grep -q "200"; then
+      echo "  ✅ Superset is ready!"
+      echo "  📍 URL: http://localhost:8088"
+      echo "  🔑 Login: admin / admin"
+    else
+      echo "  ⏳ Superset is starting (takes ~2-3 minutes first time)..."
+      echo "     Check logs: docker logs superset --tail 20"
+    fi
+  else
+    echo "  ❌ Superset is not running"
+    echo "     Start with: just up"
+  fi
+  echo ""
+
+# Open Superset in browser
+superset:
+  @echo ""
+  @echo "📊 Opening Superset..."
+  @echo "  URL: http://localhost:8088"
+  @echo "  Login: admin / admin"
+  @echo ""
+  @open http://localhost:8088 2>/dev/null || xdg-open http://localhost:8088 2>/dev/null || echo "  Open manually: http://localhost:8088"
+
+# Show Superset connection string for Trino
+superset-trino-connection:
+  @echo ""
+  @echo "📊 SUPERSET → TRINO CONNECTION"
+  @echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  @echo ""
+  @echo "  In Superset, go to: Settings → Database Connections → + Database"
+  @echo ""
+  @echo "  Database Type: Trino"
+  @echo "  SQLAlchemy URI:"
+  @echo "    trino://trino@trino:8080/iceberg"
+  @echo ""
+  @echo "  Display Name: TagMarshal Lakehouse"
+  @echo ""
+  @echo "  Available Schemas:"
+  @echo "    - silver (fact_telemetry_event)"
+  @echo "    - gold (pace_summary_by_round, signal_quality_rounds, etc.)"
+  @echo ""
+
+# ============================================
+# STREAMLIT DASHBOARD
+# ============================================
+
+# Install dashboard dependencies
+dashboard-install:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  echo ""
+  echo "📦 INSTALLING DASHBOARD DEPENDENCIES"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  pip install -r dashboard/requirements.txt
+  echo ""
+  echo "✅ Dependencies installed!"
+
+# Run the Streamlit data quality dashboard
+dashboard:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  echo ""
+  echo "📊 STARTING DATA QUALITY DASHBOARD"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  echo "  Prerequisites:"
+  echo "    - Trino must be running (just trino-status)"
+  echo "    - Gold models must be built (just gold)"
+  echo ""
+  echo "  Opening dashboard at http://localhost:8501"
+  echo "  Press Ctrl+C to stop"
+  echo ""
+  STREAMLIT_TELEMETRY=false streamlit run dashboard/app.py --server.port 8501 --server.headless true --theme.base light
+
+# Run dashboard in background
+dashboard-bg:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  echo ""
+  echo "📊 STARTING DASHBOARD (BACKGROUND)"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  STREAMLIT_TELEMETRY=false nohup streamlit run dashboard/app.py --server.port 8501 --server.headless true --theme.base light > /tmp/streamlit.log 2>&1 &
+  echo ""
+  echo "✅ Dashboard started in background"
+  echo "  📍 URL: http://localhost:8501"
+  echo "  📋 Logs: /tmp/streamlit.log"
+  echo ""
+  sleep 2
+  open http://localhost:8501 2>/dev/null || xdg-open http://localhost:8501 2>/dev/null || echo "  Open manually: http://localhost:8501"
+
+# Stop background dashboard
+dashboard-stop:
+  #!/usr/bin/env bash
+  echo ""
+  echo "🛑 STOPPING DASHBOARD"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  pkill -f "streamlit run dashboard/app.py" 2>/dev/null || echo "No dashboard process found"
+  echo "✅ Dashboard stopped"
+
+# ============================================
+# MINIO COMMANDS
+# ============================================
 
 # Show MinIO bucket structure (tree view)
 tree bucket="":

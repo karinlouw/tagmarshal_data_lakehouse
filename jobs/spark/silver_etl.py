@@ -36,7 +36,7 @@ def detect_file_format(spark: SparkSession, uri: str) -> str:
             return "json"
     except Exception:
         pass
-    
+
     # Check for CSV files
     try:
         csv_uri = uri if uri.endswith(".csv") else f"{uri}/*.csv"
@@ -45,7 +45,7 @@ def detect_file_format(spark: SparkSession, uri: str) -> str:
             return "csv"
     except Exception:
         pass
-    
+
     # Default to CSV (let it fail naturally if neither exists)
     return "csv"
 
@@ -140,12 +140,20 @@ def main():
     try:
         if file_format == "json":
             # Read only JSON files (not CSV even if present in same directory)
-            json_path = f"{landing_uri}/*.json" if not landing_uri.endswith(".json") else landing_uri
+            json_path = (
+                f"{landing_uri}/*.json"
+                if not landing_uri.endswith(".json")
+                else landing_uri
+            )
             print(f"  Reading JSON: {json_path}")
             df = spark.read.option("multiLine", True).json(json_path)
         else:
             # Read only CSV files (not JSON even if present in same directory)
-            csv_path = f"{landing_uri}/*.csv" if not landing_uri.endswith(".csv") else landing_uri
+            csv_path = (
+                f"{landing_uri}/*.csv"
+                if not landing_uri.endswith(".csv")
+                else landing_uri
+            )
             print(f"  Reading CSV: {csv_path}")
             df = (
                 spark.read.option("header", True)
@@ -183,7 +191,7 @@ def main():
             base = df.withColumnRenamed("_id", "round_id")
     else:
         base = df.withColumn("round_id", F.lit(None))
-    
+
     # Helper to safely get column (handles both CSV and JSON/MongoDB format)
     def safe_col(name: str):
         if name in df.columns:
@@ -193,7 +201,7 @@ def main():
                 return F.coalesce(F.col(f"{name}.$oid"), F.col(f"{name}.$date"))
             return F.col(name)
         return F.lit(None)
-    
+
     # Handle MongoDB date format for startTime
     if "startTime" in df.columns:
         start_time_type = str(df.schema["startTime"].dataType)
@@ -204,7 +212,7 @@ def main():
             round_start_col = F.to_timestamp(_col("startTime"))
     else:
         round_start_col = F.lit(None)
-    
+
     base = (
         base.withColumn("course_id", F.lit(args.course_id))
         .withColumn("ingest_date", F.lit(args.ingest_date))
@@ -235,15 +243,25 @@ def main():
                     F.col("loc.holeSection").cast("int").alias("hole_section"),
                     F.col("loc.startTime").cast("double").alias("start_offset_seconds"),
                     F.lit(None).alias("fix_time_iso"),  # JSON doesn't have this field
-                    F.col("loc.fixCoordinates").getItem(0).cast("double").alias("longitude"),
-                    F.col("loc.fixCoordinates").getItem(1).cast("double").alias("latitude"),
+                    F.col("loc.fixCoordinates")
+                    .getItem(0)
+                    .cast("double")
+                    .alias("longitude"),
+                    F.col("loc.fixCoordinates")
+                    .getItem(1)
+                    .cast("double")
+                    .alias("latitude"),
                     F.col("loc.isProjected").cast("boolean").alias("is_projected"),
                     F.col("loc.isProblem").cast("boolean").alias("is_problem"),
                     F.col("loc.isCache").cast("boolean").alias("is_cache"),
                     F.round(F.col("loc.paceGap").cast("double"), 3).alias("pace_gap"),
-                    F.round(F.col("loc.positionalGap").cast("double"), 3).alias("positional_gap"),
+                    F.round(F.col("loc.positionalGap").cast("double"), 3).alias(
+                        "positional_gap"
+                    ),
                     F.round(F.col("loc.pace").cast("double"), 3).alias("pace"),
-                    F.col("loc.batteryPercentage").cast("double").alias("battery_percentage"),
+                    F.col("loc.batteryPercentage")
+                    .cast("double")
+                    .alias("battery_percentage"),
                 ),
             )
             .drop("loc", "location_index")
@@ -258,26 +276,37 @@ def main():
                 return _col(name) if name in df.columns else F.lit(None)
 
             loc_structs.append(
-            F.struct(
-                F.lit(i).alias("location_index"),
-                c("hole").cast("int").alias("hole_number"),
-                c("sectionNumber").cast("int").alias("section_number"),
-                c("holeSection").cast("int").alias("hole_section"),
-                c("startTime").cast("double").alias("start_offset_seconds"),
-                c("date").alias("fix_time_iso"),
-                c("fixCoordinates[0]").cast("double").alias("longitude"),
-                c("fixCoordinates[1]").cast("double").alias("latitude"),
-                c("isProjected").cast("boolean").alias("is_projected"),
-                c("isProblem").cast("boolean").alias("is_problem"),
-                c("isCache").cast("boolean").alias("is_cache"),
-                F.round(c("paceGap").cast("double"), 3).alias("pace_gap"),
-                F.round(c("positionalGap").cast("double"), 3).alias("positional_gap"),
-                F.round(c("pace").cast("double"), 3).alias("pace"),
-                c("batteryPercentage").cast("double").alias("battery_percentage"),
+                F.struct(
+                    F.lit(i).alias("location_index"),
+                    c("hole").cast("int").alias("hole_number"),
+                    c("sectionNumber").cast("int").alias("section_number"),
+                    c("holeSection").cast("int").alias("hole_section"),
+                    c("startTime").cast("double").alias("start_offset_seconds"),
+                    c("date").alias("fix_time_iso"),
+                    c("fixCoordinates[0]").cast("double").alias("longitude"),
+                    c("fixCoordinates[1]").cast("double").alias("latitude"),
+                    c("isProjected").cast("boolean").alias("is_projected"),
+                    c("isProblem").cast("boolean").alias("is_problem"),
+                    c("isCache").cast("boolean").alias("is_cache"),
+                    F.round(c("paceGap").cast("double"), 3).alias("pace_gap"),
+                    F.round(c("positionalGap").cast("double"), 3).alias(
+                        "positional_gap"
+                    ),
+                    F.round(c("pace").cast("double"), 3).alias("pace"),
+                    c("batteryPercentage").cast("double").alias("battery_percentage"),
+                )
             )
-        )
 
         long_df = base.withColumn("location", F.explode(F.array(*loc_structs)))
+
+    # Todo: we need to investigate this more, it seems like we are losing data here.
+
+    # Filter out empty location slots (rows where key fields are NULL)
+    # This removes "padding" rows from CSVs with more slots than actual data
+    long_df = long_df.filter(
+        F.col("location.hole_number").isNotNull()
+        | F.col("location.section_number").isNotNull()
+    )
 
     # Derive fix_timestamp from ISO column or round_start + offset
     fix_ts = F.coalesce(
@@ -327,7 +356,7 @@ def main():
             "nine_number",
             F.when(F.col("section_number") <= 27, 1)
             .when(F.col("section_number") <= 54, 2)
-            .otherwise(3)
+            .otherwise(3),
         )
         .withColumn(
             "geometry_wkt",

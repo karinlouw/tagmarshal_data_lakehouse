@@ -1,0 +1,7 @@
+# Streamlit Data Quality Dashboard
+streamlit>=1.29.0
+pandas>=2.0.0
+plotly>=5.18.0
+trino>=0.327.0
+python-dotenv>=1.0.0
+

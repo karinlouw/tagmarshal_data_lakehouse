@@ -25,4 +25,36 @@ models:
       - name: course_id
         tests: [not_null]
 
+  - name: data_quality_overview
+    description: >
+      Data quality metrics by course. Shows percentage of missing values
+      in critical columns and calculates an overall data quality score.
+      Use this to identify courses with data collection issues.
+    columns:
+      - name: course_id
+        description: "Unique course identifier"
+        tests: [not_null, unique]
+      - name: data_quality_score
+        description: "0-100 score (higher = better data quality)"
 
+  - name: course_configuration_analysis
+    description: >
+      Analyzes course complexity: 9/18/27 holes, shotgun starts,
+      round completion rates, and nine combinations for multi-nine courses.
+    columns:
+      - name: course_id
+        tests: [not_null, unique]
+      - name: likely_course_type
+        description: "Detected course type: 9-hole, 18-hole, or 27-hole"
+
+  - name: critical_column_gaps
+    description: >
+      Prioritized view of missing data by importance tier.
+      Tier 1: Pace metrics (essential), Tier 2: Location fields,
+      Tier 3: Device health, Tier 4: Round configuration.
+      Includes status indicators and recommendations.
+    columns:
+      - name: course_id
+        tests: [not_null, unique]
+      - name: usability_score
+        description: "Weighted score based on data completeness in critical columns"

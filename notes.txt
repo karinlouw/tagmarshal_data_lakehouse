@@ -27,3 +27,17 @@ ORDER BY 1;
 - Determine where the bottlenecks happen in a course
 - Map geospatial data
 - Measure processing power and storage needed for AWS clusters
+- How to track course changes over time
+
+- Check the filtering of the empty locations on the silver ETL. around line 288 in the silver_etl file:
+    # Filter out empty location slots (rows where key fields are NULL)
+    # This removes "padding" rows from CSVs with more slots than actual data
+    long_df = long_df.filter(
+        F.col("location.hole_number").isNotNull() | 
+        F.col("location.section_number").isNotNull()
+    )
+
+
+- Check json nested against csv to make sure we got it right
+
+- What is defined as corrupt data? Or invalid data that goes into quarintine?

@@ -195,6 +195,38 @@ services:
         echo "[SUCCESS] Airflow initialized. Starting webserver and scheduler..."
         (airflow webserver &) && exec airflow scheduler
 
+  # Apache Superset for dashboards
+  superset:
+    image: apache/superset:3.1.0
+    container_name: superset
+    depends_on:
+      - trino
+      - postgres
+    environment:
+      SUPERSET_SECRET_KEY: ${TM_SUPERSET_SECRET_KEY:-tagmarshal_superset_secret_key_change_me}
+      SUPERSET_LOAD_EXAMPLES: "false"
+      # Use SQLite for simplicity (PostgreSQL for production)
+      SQLALCHEMY_DATABASE_URI: sqlite:////app/superset_home/superset.db
+    ports:
+      - "8088:8088"
+    volumes:
+      - superset_home:/app/superset_home
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        echo "[INFO] Installing Trino driver..."
+        pip install trino sqlalchemy-trino --quiet
+        echo "[INFO] Initializing Superset database..."
+        superset db upgrade
+        echo "[INFO] Creating admin user..."
+        superset fab create-admin --username admin --firstname Admin --lastname User --email admin@example.com --password admin || true
+        echo "[INFO] Initializing Superset..."
+        superset init
+        echo "[SUCCESS] Superset ready. Starting server..."
+        superset run -h 0.0.0.0 -p 8088 --with-threads --reload
+
 volumes:
   minio_data:
   airflow_pg:
+  superset_home:
