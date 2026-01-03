@@ -132,6 +132,8 @@ flowchart LR
 ```
 
 
+
+
 ## Data layers and table contracts
 
 ### Bronze (raw)
@@ -144,17 +146,17 @@ flowchart LR
 Primary tables:
 
 - `silver.fact_telemetry_event`
-  - `round_id`, `course_id`
-  - `fix_timestamp`
-  - `hole_number`, `section_number`
-  - `longitude`, `latitude`
-  - `geometry` (Sedona point)
-  - `h3_index` (optional/if function available)
-  - `data_quality_tier` from `isProjected`
-  - `is_cache`, `is_projected`, `pace_gap`, `positional_gap`, `pace`, battery fields (where present)
-  - `event_date`, `event_year`, `event_month` derived from `fix_timestamp`
+- `round_id`, `course_id`
+- `fix_timestamp`
+- `hole_number`, `section_number`
+- `longitude`, `latitude`
+- `geometry` (Sedona point)
+- `h3_index` (optional/if function available)
+- `data_quality_tier` from `isProjected`
+- `is_cache`, `is_projected`, `pace_gap`, `positional_gap`, `pace`, battery fields (where present)
+- `event_date`, `event_year`, `event_month` derived from `fix_timestamp`
 - `silver.fact_device_health`
-  - `round_id`, `course_id`, `device_log_json`
+- `round_id`, `course_id`, `device_log_json`
 
 **Dedup rule**: for same `(round_id, fix_timestamp)` choose `is_cache=true` first.
 
@@ -169,14 +171,14 @@ Primary tables:
 Add validations at two points:
 
 - **Bronze upload validation** (cheap):
-  - file readable, header contains `_id`, `course`, and at least one `locations[0].startTime`
-  - record count > 0
+- file readable, header contains `_id`, `course`, and at least one `locations[0].startTime`
+- record count > 0
 - **Silver validation** (real quality):
-  - `fix_timestamp` parses (non-null rate threshold)
-  - latitude in [-90, 90], longitude in [-180, 180]
-  - required keys not null: `round_id`, `course_id`
-  - duplicate rate threshold for `(round_id, fix_timestamp)` tracked
-  - optional: detect obviously swapped lat/lon (abs(lat) > 90 etc.)
+- `fix_timestamp` parses (non-null rate threshold)
+- latitude in [-90, 90], longitude in [-180, 180]
+- required keys not null: `round_id`, `course_id`
+- duplicate rate threshold for `(round_id, fix_timestamp)` tracked
+- optional: detect obviously swapped lat/lon (abs(lat) > 90 etc.)
 
 **Behavior**:
 
@@ -187,9 +189,9 @@ Add validations at two points:
 - Use `context.log.info/debug/error` with structured metadata.
 - Do not silently “skip” on missing data unless explicitly configured (dev-only toggle).
 - Raise exceptions on:
-  - no input files found when you expect them
-  - schema mismatch beyond allowed drift
-  - failed writes to Iceberg/S3
+- no input files found when you expect them
+- schema mismatch beyond allowed drift
+- failed writes to Iceberg/S3
 
 ## Config-only switching (local ↔ AWS)
 
@@ -203,9 +205,9 @@ Goal: switch environments by swapping **env files**, not code.
 ### Docker usage
 
 - Local:
-  - `docker compose --env-file config/local.env up -d`
+- `docker compose --env-file config/local.env up -d`
 - AWS execution context:
-  - Glue jobs use their own job parameters/roles; Dagster Cloud agent uses AWS IAM.
+- Glue jobs use their own job parameters/roles; Dagster Cloud agent uses AWS IAM.
 
 ### Spark catalog switching
 
@@ -230,10 +232,10 @@ Add a `Justfile` with commands like:
 ### Phase 1 — Fix Silver extraction to match real headers
 
 - Update Silver ETL to build structs with:
-  - `fix_timestamp_raw` from `locations[i].startTime`
-  - `longitude` from `locations[i].fixCoordinates[0]`
-  - `latitude` from `locations[i].fixCoordinates[1]`
-  - optional metrics: `paceGap`, `positionalGap`, `pace`, battery, heldUp/holdingUp
+- `fix_timestamp_raw` from `locations[i].startTime`
+- `longitude` from `locations[i].fixCoordinates[0]`
+- `latitude` from `locations[i].fixCoordinates[1]`
+- optional metrics: `paceGap`, `positionalGap`, `pace`, battery, heldUp/holdingUp
 - Ensure superset behavior across datasets (missing columns become nulls).
 
 ### Phase 2 — Partitioning and table layout
@@ -253,13 +255,3 @@ Add a `Justfile` with commands like:
 ### Phase 5 — AWS cutover plan (managed)
 
 - S3 buckets + IAM + Glue databases
-- Glue Spark jobs for Silver/Gold + Sedona deps
-- Athena workgroup + sample queries
-- Dagster Cloud agent in VPC triggers Glue jobs
-
-## Files you will touch (when you start executing)
-
-- Local stack: [`docker-compose.yml`](/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/docker-compose.yml), [`docs/runbook_local_dev.md`](/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/docs/runbook_local_dev.md)
-- Dagster assets: [`orchestration/dagster_project/assets/bronze.py`](/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/orchestration/dagster_project/assets/bronze.py), [`orchestration/dagster_project/assets/silver.py`](/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/orchestration/dagster_project/assets/silver.py), [`orchestration/dagster_project/assets/gold.py`](/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/orchestration/dagster_project/assets/gold.py), [`orchestration/dagster_project/assets/ops.py`](/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/orchestration/dagster_project/assets/ops.py)
-- Config: `config/local.env`, `config/aws.env`
-- DX: `Justfile`

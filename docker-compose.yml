@@ -120,6 +120,8 @@ services:
       - "5432:5432"
     volumes:
       - airflow_pg:/var/lib/postgresql/data
+      # Auto-run migrations on first startup
+      - ./db/migrations:/docker-entrypoint-initdb.d:ro
 
   airflow:
     image: apache/airflow:2.10.3-python3.11
@@ -132,7 +134,7 @@ services:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${TM_POSTGRES_USER:-airflow}:${TM_POSTGRES_PASSWORD:-airflow}@postgres:5432/${TM_POSTGRES_DB:-airflow}
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
       AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
       PYTHONWARNINGS: "ignore::FutureWarning,ignore::UserWarning"
       AIRFLOW__WEBSERVER__RATE_LIMIT_ENABLED: "false"
@@ -182,12 +184,16 @@ services:
     command:
       - -c
       - |
-        pip install --no-cache-dir -r /opt/airflow/requirements.txt 2>/dev/null &&
-        sleep 5 &&
-        airflow db init 2>&1 | grep -v "FutureWarning\|DeprecationWarning" &&
-        airflow users create --username $$TM_AIRFLOW_ADMIN_USERNAME --password $$TM_AIRFLOW_ADMIN_PASSWORD --firstname admin --lastname admin --role Admin --email $$TM_AIRFLOW_ADMIN_EMAIL 2>&1 | grep -v "already exist\|FutureWarning" || true &&
-        echo "[SUCCESS] Airflow initialized. Starting webserver and scheduler..." &&
-        airflow webserver & exec airflow scheduler
+        echo "[INFO] Installing Python dependencies..."
+        pip install --no-cache-dir -r /opt/airflow/requirements.txt
+        echo "[INFO] Waiting for database..."
+        sleep 5
+        echo "[INFO] Initializing Airflow database..."
+        airflow db init
+        echo "[INFO] Creating admin user..."
+        airflow users create --username $$TM_AIRFLOW_ADMIN_USERNAME --password $$TM_AIRFLOW_ADMIN_PASSWORD --firstname admin --lastname admin --role Admin --email $$TM_AIRFLOW_ADMIN_EMAIL || true
+        echo "[SUCCESS] Airflow initialized. Starting webserver and scheduler..."
+        (airflow webserver &) && exec airflow scheduler
 
 volumes:
   minio_data:

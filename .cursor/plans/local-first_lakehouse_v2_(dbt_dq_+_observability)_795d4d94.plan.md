@@ -73,7 +73,7 @@ todos:
 
 ## Repo scaffold (greenfield)
 
-The repo currently contains only your design doc (`[local-first_aws_lakehouse_(geospatial)_v2_updated.md](/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/local-first_aws_lakehouse_\\(geospatial)_v2_updated.md)`), so we’ll create everything below.
+The repo currently contains only your design doc (`[local-first_aws_lakehouse_(geospatial)_v2_updated.md](/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/local-first_aws_lakehouse_\\\\\\\\\\\(geospatial)_v2_updated.md)`), so we’ll create everything below.
 
 - **Local stack**: [`docker-compose.yml`](/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/docker-compose.yml) (MinIO, Spark, Iceberg REST catalog, Trino, Airflow + Postgres)
 - **Orchestration (Airflow)**: [`orchestration/airflow/`](/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/orchestration/airflow) (DAGs + Docker config)
@@ -95,13 +95,13 @@ The repo currently contains only your design doc (`[local-first_aws_lakehouse_(g
 Primary tables:
 
 - `silver.fact_telemetry_event` (long)
-  - `fix_timestamp` from `locations[i].startTime`
-  - `longitude` from `locations[i].fixCoordinates[0]`
-  - `latitude` from `locations[i].fixCoordinates[1]`
-  - `event_date` derived from `fix_timestamp`
-  - `geometry` (Sedona point)
-  - optional `h3_index`
-  - **Dedup**: for `(round_id, fix_timestamp)` prefer `is_cache=true`
+- `fix_timestamp` from `locations[i].startTime`
+- `longitude` from `locations[i].fixCoordinates[0]`
+- `latitude` from `locations[i].fixCoordinates[1]`
+- `event_date` derived from `fix_timestamp`
+- `geometry` (Sedona point)
+- optional `h3_index`
+- **Dedup**: for `(round_id, fix_timestamp)` prefer `is_cache=true`
 - `silver.fact_device_health` with log payload fields (e.g. `captureLogs`) stored as JSON/string
 
 ### Quarantine
@@ -133,21 +133,23 @@ flowchart LR
   Spark --> Quarantine
 ```
 
+
+
 ## Observability (logging + run metadata)
 
 ### Minimum (local dev, day-1)
 
 - **Structured logs** everywhere (Airflow tasks, Spark jobs, dbt runs) with consistent fields:
-  - `run_id`, `dag_id`, `task_id`, `course_id`, `ingest_date`, `input_path`, `output_table`, `row_count`, `duration_ms`, `status`
+- `run_id`, `dag_id`, `task_id`, `course_id`, `ingest_date`, `input_path`, `output_table`, `row_count`, `duration_ms`, `status`
 - **Airflow UI** as the primary run monitor.
 - **dbt artifacts** (`manifest.json`, `run_results.json`) persisted per run to a known location (local volume / MinIO path) for later inspection.
 
 ### Next (still local, good learning + real value)
 
 - Add lightweight metrics:
-  - row counts per stage
-  - invalid row counts / failure reasons
-  - duplicate rates for `(round_id, fix_timestamp)`
+- row counts per stage
+- invalid row counts / failure reasons
+- duplicate rates for `(round_id, fix_timestamp)`
 - Emit a small “run summary” JSON per job into MinIO (e.g. `observability/runs/<run_id>.json`).
 
 *(We’ll keep this pragmatic: dashboards can be added later (e.g. Grafana/Prometheus/OpenTelemetry) once the pipeline is stable.)*
@@ -157,13 +159,13 @@ flowchart LR
 ### What dbt will do
 
 - **Schema tests** (dbt built-in + dbt-utils where useful):
-  - `not_null`: `round_id`, `course_id`, `fix_timestamp`
-  - `accepted_range`: `latitude` in [-90, 90], `longitude` in [-180, 180]
-  - `unique`/`unique_combination_of_columns` (where appropriate, e.g. `(round_id, fix_timestamp, device_id)` if device_id exists)
+- `not_null`: `round_id`, `course_id`, `fix_timestamp`
+- `accepted_range`: `latitude` in [-90, 90], `longitude` in [-180, 180]
+- `unique`/`unique_combination_of_columns` (where appropriate, e.g. `(round_id, fix_timestamp, device_id)` if device_id exists)
 - **Freshness**: define source freshness checks for the Silver tables (local and AWS).
 - **Custom tests** for:
-  - swapped lat/lon detection heuristics
-  - duplicate rate threshold (fail if above threshold)
+- swapped lat/lon detection heuristics
+- duplicate rate threshold (fail if above threshold)
 - **Gating**: Airflow runs `dbt test` after Silver write; failures fail the DAG.
 
 ### What Spark will still do (and why)
@@ -171,8 +173,8 @@ flowchart LR
 - **Bronze-level cheap validation** (to avoid garbage-in)
 - **Hard parse failures** (e.g. unreadable files) should still fail early
 - For row-level issues, Spark can optionally produce:
-  - a quarantined subset (bad rows) where feasible
-  - a run-level failure report
+- a quarantined subset (bad rows) where feasible
+- a run-level failure report
 
 ## Implementation steps
 
@@ -183,10 +185,10 @@ flowchart LR
 ### 2) Config-only switching (local ↔ AWS)
 
 - Env-file driven configuration for:
-  - storage endpoint
-  - Iceberg catalog type (REST vs Glue)
-  - bucket names/prefixes
-  - database/table names
+- storage endpoint
+- Iceberg catalog type (REST vs Glue)
+- bucket names/prefixes
+- database/table names
 
 ### 3) Bronze ingest
 
@@ -207,9 +209,9 @@ flowchart LR
 ### 6) Gold (dbt models)
 
 - Create a couple initial Gold models:
-  - `gold.pace_summary_by_round`
-  - `gold.signal_quality_rounds`
-  - `gold.device_health_errors`
+- `gold.pace_summary_by_round`
+- `gold.signal_quality_rounds`
+- `gold.device_health_errors`
 
 ### 7) Logging + run summaries
 
@@ -221,11 +223,11 @@ flowchart LR
 - `Justfile` for one-command workflows.
 - Runbook with “happy path”, troubleshooting, and "what to look at when a run fails".
 - Add short learning notes in `docs/learning/`:
-  - `lakehouse_layers.md` (Bronze/Silver/Gold)
-  - `iceberg_basics.md` (why Iceberg, partitions vs files)
-  - `dbt_testing_101.md` (tests, sources, freshness, severity)
-  - `airflow_101.md` (DAGs, retries, XCom, params)
-  - `how_to_debug_runs.md` (Airflow logs, Spark logs, dbt artifacts)
+- `lakehouse_layers.md` (Bronze/Silver/Gold)
+- `iceberg_basics.md` (why Iceberg, partitions vs files)
+- `dbt_testing_101.md` (tests, sources, freshness, severity)
+- `airflow_101.md` (DAGs, retries, XCom, params)
+- `how_to_debug_runs.md` (Airflow logs, Spark logs, dbt artifacts)
 
 ## AWS cutover plan (production mapping)
 
@@ -235,16 +237,5 @@ flowchart LR
 - **SQL**: Athena.
 - **Orchestration**: Airflow triggers Glue jobs + dbt runs against Athena (`dbt-athena`).
 - Deliver a checklist for:
-  - Glue job packaging + parameters
-  - IAM role permissions
-  - Athena workgroup + output location
-  - Glue DB/table permissions
-  - Where logs and dbt artifacts live in S3
-
-## Acceptance criteria
-
-- Local: `just up` starts the stack; `just bronze-upload` lands files to Bronze key layout.
-- Local: Silver creates `silver.fact_telemetry_event` with correct lon/lat and `event_date` partition.
-- Local: `dbt test` runs and fails the pipeline if data quality thresholds are violated.
-- Observability: each run produces structured logs + a persisted run summary + saved dbt artifacts.
-- AWS: documented, parameterized path to run the same pipeline on S3+Glue+Athena with minimal/no code changes.
+- Glue job packaging + parameters
+- IAM role permissions

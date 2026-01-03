@@ -1,10 +1,14 @@
-"""Silver ETL job - transforms Bronze CSV into Silver Iceberg table (long format).
+"""Silver ETL job - transforms Bronze CSV/JSON into Silver Iceberg table (long format).
 
 This script is run via spark-submit inside the Spark container.
-It reads Bronze CSV files from the Landing Zone, transforms them into a long-format table
-(one row per GPS fix), and writes to an Iceberg table in the Source Store.
+It reads Bronze CSV or JSON files from the Landing Zone, transforms them into a long-format
+table (one row per GPS fix), and writes to an Iceberg table in the Source Store.
 
-Data Flow: Landing Zone CSV → Spark DataFrame → Iceberg Table (silver.fact_telemetry_event)
+Data Flow: Landing Zone (CSV or JSON) → Spark DataFrame → Iceberg Table (silver.fact_telemetry_event)
+
+Supports two input formats:
+- CSV: Flattened columns like locations[0].hole, locations[0].startTime
+- JSON: Nested MongoDB format with locations array
 """
 
 from __future__ import annotations
@@ -20,6 +24,30 @@ from pyspark.sql import SparkSession, functions as F, Window
 def _col(name: str):
     """Escape column name containing brackets/dots for Spark SQL."""
     return F.col(f"`{name}`")
+
+
+def detect_file_format(spark: SparkSession, uri: str) -> str:
+    """Detect if input is CSV or JSON based on file extension or content."""
+    # Check if any JSON files exist
+    try:
+        json_uri = uri if uri.endswith(".json") else f"{uri}/*.json"
+        json_count = spark.read.format("binaryFile").load(json_uri).count()
+        if json_count > 0:
+            return "json"
+    except Exception:
+        pass
+    
+    # Check for CSV files
+    try:
+        csv_uri = uri if uri.endswith(".csv") else f"{uri}/*.csv"
+        csv_count = spark.read.format("binaryFile").load(csv_uri).count()
+        if csv_count > 0:
+            return "csv"
+    except Exception:
+        pass
+    
+    # Default to CSV (let it fail naturally if neither exists)
+    return "csv"
 
 
 def discover_location_indices(columns: list[str]) -> list[int]:
@@ -103,14 +131,28 @@ def main():
     landing_uri = f"s3a://{bucket_landing}/{args.bronze_prefix}"
     print(f"  Reading: {landing_uri}")
 
-    # Read Landing Zone CSV
+    # Detect file format (CSV or JSON)
+    file_format = detect_file_format(spark, landing_uri)
+    print(f"  Format detected: {file_format.upper()}")
+
+    # Read Landing Zone data based on format
+    # IMPORTANT: When both JSON and CSV exist, read ONLY the correct file type
     try:
-        df = (
-            spark.read.option("header", True)
-            .option("escape", '"')
-            .option("multiLine", False)
-            .csv(landing_uri)
-        )
+        if file_format == "json":
+            # Read only JSON files (not CSV even if present in same directory)
+            json_path = f"{landing_uri}/*.json" if not landing_uri.endswith(".json") else landing_uri
+            print(f"  Reading JSON: {json_path}")
+            df = spark.read.option("multiLine", True).json(json_path)
+        else:
+            # Read only CSV files (not JSON even if present in same directory)
+            csv_path = f"{landing_uri}/*.csv" if not landing_uri.endswith(".csv") else landing_uri
+            print(f"  Reading CSV: {csv_path}")
+            df = (
+                spark.read.option("header", True)
+                .option("escape", '"')
+                .option("multiLine", False)
+                .csv(csv_path)
+            )
     except Exception as e:
         print(f"  ❌ Failed to read Landing Zone data: {e}")
         raise
@@ -118,30 +160,104 @@ def main():
     row_count = df.count()
     print(f"  Found {row_count:,} rows in Landing Zone")
 
-    location_idxs = discover_location_indices(df.columns)
-    if not location_idxs:
-        raise ValueError(
-            "No locations[i].startTime columns found; cannot build Silver long table"
-        )
-    print(f"  Found {len(location_idxs)} location indices")
+    # For JSON with nested locations, we process differently
+    if file_format == "json" and "locations" in df.columns:
+        location_idxs = None  # Signal to use JSON path
+        print(f"  Using nested JSON locations array")
+    else:
+        location_idxs = discover_location_indices(df.columns)
+        if not location_idxs:
+            raise ValueError(
+                "No locations[i].startTime columns found; cannot build Silver long table"
+            )
+        print(f"  Found {len(location_idxs)} location indices")
 
     # Add round-level fields
+    # Handle MongoDB _id format: can be string or {"$oid": "..."}
+    if "_id" in df.columns:
+        # Check if _id is a struct (MongoDB format) or string
+        id_type = str(df.schema["_id"].dataType)
+        if "StructType" in id_type:
+            base = df.withColumn("round_id", F.col("_id.$oid"))
+        else:
+            base = df.withColumnRenamed("_id", "round_id")
+    else:
+        base = df.withColumn("round_id", F.lit(None))
+    
+    # Helper to safely get column (handles both CSV and JSON/MongoDB format)
+    def safe_col(name: str):
+        if name in df.columns:
+            col_type = str(df.schema[name].dataType)
+            if "StructType" in col_type:
+                # MongoDB format: {"$oid": "..."} or {"$date": "..."}
+                return F.coalesce(F.col(f"{name}.$oid"), F.col(f"{name}.$date"))
+            return F.col(name)
+        return F.lit(None)
+    
+    # Handle MongoDB date format for startTime
+    if "startTime" in df.columns:
+        start_time_type = str(df.schema["startTime"].dataType)
+        if "StructType" in start_time_type:
+            # MongoDB format: {"$date": "..."}
+            round_start_col = F.to_timestamp(F.col("startTime.$date"))
+        else:
+            round_start_col = F.to_timestamp(_col("startTime"))
+    else:
+        round_start_col = F.lit(None)
+    
     base = (
-        df.withColumnRenamed("_id", "round_id")
-        .withColumn("course_id", F.lit(args.course_id))
+        base.withColumn("course_id", F.lit(args.course_id))
         .withColumn("ingest_date", F.lit(args.ingest_date))
-        .withColumn("round_start_time", F.to_timestamp(_col("startTime")))
+        .withColumn("round_start_time", round_start_col)
+        # Round configuration fields (critical for multi-nine and shotgun starts)
+        .withColumn("start_hole", safe_col("startHole").cast("int"))
+        .withColumn("start_section", safe_col("startSection").cast("int"))
+        .withColumn("end_section", safe_col("endSection").cast("int"))
+        .withColumn("is_nine_hole", safe_col("isNineHole").cast("boolean"))
+        .withColumn("current_nine", safe_col("currentNine").cast("int"))
+        .withColumn("goal_time", safe_col("goalTime").cast("int"))
+        .withColumn("is_complete", safe_col("complete").cast("boolean"))
     )
 
-    # Build array<struct> for all location indices and explode to long format
-    loc_structs = []
-    for i in location_idxs:
+    # Handle JSON with nested locations array vs CSV with flattened columns
+    if location_idxs is None:
+        # JSON format: explode nested locations array directly
+        # posexplode returns (position, value) tuple - must select both separately
+        long_df = (
+            base.select("*", F.posexplode("locations").alias("location_index", "loc"))
+            .drop("locations")
+            .withColumn(
+                "location",
+                F.struct(
+                    F.col("location_index"),
+                    F.col("loc.hole").cast("int").alias("hole_number"),
+                    F.col("loc.sectionNumber").cast("int").alias("section_number"),
+                    F.col("loc.holeSection").cast("int").alias("hole_section"),
+                    F.col("loc.startTime").cast("double").alias("start_offset_seconds"),
+                    F.lit(None).alias("fix_time_iso"),  # JSON doesn't have this field
+                    F.col("loc.fixCoordinates").getItem(0).cast("double").alias("longitude"),
+                    F.col("loc.fixCoordinates").getItem(1).cast("double").alias("latitude"),
+                    F.col("loc.isProjected").cast("boolean").alias("is_projected"),
+                    F.col("loc.isProblem").cast("boolean").alias("is_problem"),
+                    F.col("loc.isCache").cast("boolean").alias("is_cache"),
+                    F.round(F.col("loc.paceGap").cast("double"), 3).alias("pace_gap"),
+                    F.round(F.col("loc.positionalGap").cast("double"), 3).alias("positional_gap"),
+                    F.round(F.col("loc.pace").cast("double"), 3).alias("pace"),
+                    F.col("loc.batteryPercentage").cast("double").alias("battery_percentage"),
+                ),
+            )
+            .drop("loc", "location_index")
+        )
+    else:
+        # CSV format: build array<struct> for all location indices
+        loc_structs = []
+        for i in location_idxs:
 
-        def c(suffix: str):
-            name = f"locations[{i}].{suffix}"
-            return _col(name) if name in df.columns else F.lit(None)
+            def c(suffix: str):
+                name = f"locations[{i}].{suffix}"
+                return _col(name) if name in df.columns else F.lit(None)
 
-        loc_structs.append(
+            loc_structs.append(
             F.struct(
                 F.lit(i).alias("location_index"),
                 c("hole").cast("int").alias("hole_number"),
@@ -154,14 +270,14 @@ def main():
                 c("isProjected").cast("boolean").alias("is_projected"),
                 c("isProblem").cast("boolean").alias("is_problem"),
                 c("isCache").cast("boolean").alias("is_cache"),
-                c("paceGap").cast("double").alias("pace_gap"),
-                c("positionalGap").cast("double").alias("positional_gap"),
-                c("pace").cast("double").alias("pace"),
+                F.round(c("paceGap").cast("double"), 3).alias("pace_gap"),
+                F.round(c("positionalGap").cast("double"), 3).alias("positional_gap"),
+                F.round(c("pace").cast("double"), 3).alias("pace"),
                 c("batteryPercentage").cast("double").alias("battery_percentage"),
             )
         )
 
-    long_df = base.withColumn("location", F.explode(F.array(*loc_structs)))
+        long_df = base.withColumn("location", F.explode(F.array(*loc_structs)))
 
     # Derive fix_timestamp from ISO column or round_start + offset
     fix_ts = F.coalesce(
@@ -178,6 +294,15 @@ def main():
             "course_id",
             "ingest_date",
             fix_ts.alias("fix_timestamp"),
+            # Round configuration (for proper multi-nine and shotgun start handling)
+            "start_hole",
+            "start_section",
+            "end_section",
+            "is_nine_hole",
+            "current_nine",
+            "goal_time",
+            "is_complete",
+            # Location fields
             F.col("location.location_index"),
             F.col("location.hole_number"),
             F.col("location.section_number"),
@@ -193,6 +318,17 @@ def main():
             F.col("location.battery_percentage"),
         )
         .withColumn("event_date", F.to_date("fix_timestamp"))
+        # Derive which nine the location is in based on section_number
+        # This handles 27-hole courses (3 nines) like Bradshaw Farm:
+        #   Sections 1-27 → Nine 1
+        #   Sections 28-54 → Nine 2
+        #   Sections 55+ → Nine 3
+        .withColumn(
+            "nine_number",
+            F.when(F.col("section_number") <= 27, 1)
+            .when(F.col("section_number") <= 54, 2)
+            .otherwise(3)
+        )
         .withColumn(
             "geometry_wkt",
             F.when(

@@ -7,6 +7,35 @@ from datetime import datetime
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.providers.postgres.hooks.postgres import PostgresHook
+
+
+def log_to_registry(course_id: str, ingest_date: str, status: str, 
+                    rows: int = 0, error: str = None, dag_run_id: str = None):
+    """Log Silver ETL result to ingestion registry for resumability tracking."""
+    try:
+        hook = PostgresHook(postgres_conn_id='postgres_default')
+        
+        error_value = f"'{error[:500]}'" if error else "NULL"
+        
+        sql = f"""
+            INSERT INTO ingestion_log 
+                (course_id, ingest_date, layer, filename, status, rows_processed, 
+                 error_message, dag_run_id, completed_at)
+            VALUES 
+                ('{course_id}', '{ingest_date}', 'silver', '{course_id}_{ingest_date}', 
+                 '{status}', {rows}, {error_value}, '{dag_run_id or ""}', NOW())
+            ON CONFLICT (filename, ingest_date, layer) 
+            DO UPDATE SET 
+                status = '{status}',
+                rows_processed = {rows},
+                error_message = {error_value},
+                completed_at = NOW(),
+                retry_count = ingestion_log.retry_count + 1
+        """
+        hook.run(sql)
+    except Exception as e:
+        print(f"Warning: Failed to log to registry: {e}")
 
 
 def run_spark_etl(**context):
@@ -79,15 +108,43 @@ def run_spark_etl(**context):
             print("  [Spark stderr]")
             for line in result.stderr.split("\n")[-20:]:  # Last 20 lines
                 print(f"    {line}")
-        raise RuntimeError(
-            f"Spark job failed: {result.stderr[-500:] if result.stderr else 'No error message'}"
+        
+        # Log failure to registry for resumability
+        error_msg = result.stderr[-500:] if result.stderr else "No error message"
+        log_to_registry(
+            course_id, ingest_date, "failed", 
+            error=error_msg,
+            dag_run_id=context.get("dag_run").run_id
         )
+        
+        raise RuntimeError(f"Spark job failed: {error_msg}")
+
+    # Extract row count from output if available
+    rows_processed = 0
+    for line in result.stdout.split("\n"):
+        if "Appended" in line and "rows" in line:
+            try:
+                # Parse "→ Appended 67,660 rows"
+                import re
+                match = re.search(r'(\d[\d,]*)\s*rows', line)
+                if match:
+                    rows_processed = int(match.group(1).replace(',', ''))
+            except:
+                pass
+
+    # Log success to registry for resumability tracking
+    log_to_registry(
+        course_id, ingest_date, "success",
+        rows=rows_processed,
+        dag_run_id=context.get("dag_run").run_id
+    )
 
     print("")
     print("✅ SILVER ETL COMPLETE")
     print(f"{'='*60}")
     print(f"  Course:      {course_id}")
     print(f"  Ingest Date: {ingest_date}")
+    print(f"  Rows:        {rows_processed:,}")
     print("")
     print("  📍 Data Locations:")
     print(
@@ -98,7 +155,7 @@ def run_spark_etl(**context):
     )
     print(f"{'='*60}\n")
 
-    return {"course_id": course_id, "status": "success"}
+    return {"course_id": course_id, "status": "success", "rows": rows_processed}
 
 
 with DAG(

@@ -45,6 +45,11 @@ class TMConfig:
     db_gold: str
     obs_prefix: str
     local_input_dir: str
+    # API settings (for future TagMarshal API integration)
+    data_source: str  # "file" or "api"
+    api_base_url: str | None
+    api_key: str | None
+    api_timeout: int
 
     @staticmethod
     def from_env() -> "TMConfig":
@@ -69,4 +74,9 @@ class TMConfig:
             db_gold=_env("TM_DB_GOLD", "gold"),
             obs_prefix=os.getenv("TM_OBS_PREFIX", ""),
             local_input_dir=_env("TM_LOCAL_INPUT_DIR", "/opt/tagmarshal/input"),
+            # API settings
+            data_source=_env("TM_DATA_SOURCE", "file"),
+            api_base_url=os.getenv("TM_API_BASE_URL"),
+            api_key=os.getenv("TM_API_KEY"),
+            api_timeout=int(os.getenv("TM_API_TIMEOUT", "30")),
         )

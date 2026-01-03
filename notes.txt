@@ -5,3 +5,25 @@
 4. Validate ingestion (row count, filesize)
 5. Append to tables with the same filenames.
 6. view data ib a database
+
+
+
+3 January:
+- Check decimal values in pace columns
+
+
+- This hour of day query shows play basically the hole day! We have to double check datetime standardisation:
+SELECT 
+    hour(fix_timestamp) as hour_of_day, 
+    count(*) as fixes,
+    count(DISTINCT round_id) as rounds
+FROM fact_telemetry_event
+WHERE fix_timestamp IS NOT NULL
+GROUP BY 1
+ORDER BY 1;
+
+- We need to validate that we ingested the data correctly...somehow
+
+- Determine where the bottlenecks happen in a course
+- Map geospatial data
+- Measure processing power and storage needed for AWS clusters

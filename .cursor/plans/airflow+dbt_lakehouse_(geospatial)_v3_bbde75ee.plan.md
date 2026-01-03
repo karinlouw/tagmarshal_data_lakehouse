@@ -29,11 +29,11 @@ todos:
 ## What changed vs v2
 
 - **Orchestration**: Replace **Dagster** with **Apache Airflow**.
-  - **Local**: Airflow runs in Docker Compose.
-  - **AWS**: Airflow runs on **Amazon MWAA**.
+- **Local**: Airflow runs in Docker Compose.
+- **AWS**: Airflow runs on **Amazon MWAA**.
 - **Transformations**: Use **dbt for Silver→Gold** modeling, tests, and documentation.
-  - **Local dbt target**: **Trino** (dbt-trino) querying Iceberg tables.
-  - **AWS dbt target**: **Athena** (dbt-athena) querying Iceberg tables registered in Glue.
+- **Local dbt target**: **Trino** (dbt-trino) querying Iceberg tables.
+- **AWS dbt target**: **Athena** (dbt-athena) querying Iceberg tables registered in Glue.
 
 ## Architecture (local and AWS)
 
@@ -75,6 +75,8 @@ flowchart LR
   end
 ```
 
+
+
 ## Data layers and contracts
 
 ### Bronze (raw landing)
@@ -99,9 +101,9 @@ Primary tables:
 
 - Produced by **dbt models** reading Silver and writing Gold.
 - Example tables:
-  - `gold.pace_summary_by_round`
-  - `gold.signal_quality_rounds`
-  - `gold.device_health_errors`
+- `gold.pace_summary_by_round`
+- `gold.signal_quality_rounds`
+- `gold.device_health_errors`
 
 ## Validation and data quality (fail fast + quarantine)
 
@@ -114,12 +116,12 @@ Primary tables:
 ### DAG design
 
 - Use a single pipeline DAG with clear task boundaries:
-  - `bronze_upload` (PythonOperator)
-  - `silver_etl` (Spark submit locally; Glue job in AWS)
-  - `silver_validate` (Spark/SQL validation step)
-  - `gold_dbt_run` (dbt run)
-  - `gold_dbt_test` (dbt test)
-  - optional `maintenance_compact` (Iceberg maintenance)
+- `bronze_upload` (PythonOperator)
+- `silver_etl` (Spark submit locally; Glue job in AWS)
+- `silver_validate` (Spark/SQL validation step)
+- `gold_dbt_run` (dbt run)
+- `gold_dbt_test` (dbt test)
+- optional `maintenance_compact` (Iceberg maintenance)
 
 ### Local execution
 
@@ -129,8 +131,8 @@ Primary tables:
 ### AWS execution (MWAA)
 
 - MWAA schedules and monitors:
-  - **Glue jobs** for Silver ETL.
-  - **dbt runs** executed by MWAA tasks (option A) or by a container target (future option).
+- **Glue jobs** for Silver ETL.
+- **dbt runs** executed by MWAA tasks (option A) or by a container target (future option).
 
 > Note: MWAA has packaging constraints. The plan will include a “minimal friction” packaging approach: store DAGs in S3; keep dbt project and profiles in the MWAA DAGs/plugins bundle (or downloaded from S3 at runtime), and keep secrets in AWS Secrets Manager.
 
@@ -139,18 +141,18 @@ Primary tables:
 ### dbt project layout
 
 - Create a dbt project (example path): [`transformations/dbt_tagmarshal/`](transformations/dbt_tagmarshal/)
-  - `models/gold/` for Gold models
-  - `models/intermediate/` for reusable transforms
-  - `tests/` for custom tests
-  - `macros/` for shared logic
+- `models/gold/` for Gold models
+- `models/intermediate/` for reusable transforms
+- `tests/` for custom tests
+- `macros/` for shared logic
 
 ### dbt adapters and profiles
 
 - **Local**: `dbt-trino` profile points at local Trino.
 - **AWS**: `dbt-athena` profile points at Athena workgroup + S3 staging + Glue Catalog.
 - Use targets:
-  - `local`
-  - `aws`
+- `local`
+- `aws`
 
 ### Model strategies
 
@@ -160,28 +162,28 @@ Primary tables:
 ### Testing + docs (junior-friendly learning path)
 
 - Add dbt tests early:
-  - `not_null` for `round_id`, `fix_timestamp`
-  - range tests for lat/lon
-  - uniqueness tests where appropriate (e.g., surrogate keys)
+- `not_null` for `round_id`, `fix_timestamp`
+- range tests for lat/lon
+- uniqueness tests where appropriate (e.g., surrogate keys)
 - Use `dbt docs generate` to learn lineage.
 
 ## Local↔AWS config switching (config-only)
 
 - Keep env-file driven configuration:
-  - `config/local.env`
-  - `config/aws.env`
+- `config/local.env`
+- `config/aws.env`
 - Airflow connections/variables:
-  - local uses `.env` and local connections
-  - MWAA uses Airflow Connections populated via Secrets Manager
+- local uses `.env` and local connections
+- MWAA uses Airflow Connections populated via Secrets Manager
 
 ## Developer experience (simple commands)
 
 - Keep a `Justfile` but adjust commands to Airflow:
-  - `just up` / `just down`
-  - `just airflow-ui`
-  - `just trigger pipeline`
-  - `just dbt-run` / `just dbt-test`
-  - `just reset-local`
+- `just up` / `just down`
+- `just airflow-ui`
+- `just trigger pipeline`
+- `just dbt-run` / `just dbt-test`
+- `just reset-local`
 
 ## AWS cutover (MWAA + Glue + Athena + Iceberg)
 
@@ -189,9 +191,9 @@ Primary tables:
 - **Glue**: database + Iceberg table registrations
 - **Athena**: workgroup + output location + sample queries
 - **MWAA**:
-  - environment in private subnets
-  - IAM role permitting Glue start/get job runs, read/write S3 buckets, read Secrets Manager
-  - DAGs + plugins uploaded to MWAA S3 bucket
+- environment in private subnets
+- IAM role permitting Glue start/get job runs, read/write S3 buckets, read Secrets Manager
+- DAGs + plugins uploaded to MWAA S3 bucket
 - **Observability**: CloudWatch logs for MWAA + Glue; structured task logs.
 
 ## Files you will touch (when executing)
@@ -199,20 +201,11 @@ Primary tables:
 - Local stack: [`/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/docker-compose.yml`](/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/docker-compose.yml)
 - Docs: [`/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/docs/runbook_local_dev.md`](/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/docs/runbook_local_dev.md)
 - Replace Dagster project with Airflow:
-  - New: `orchestration/airflow/dags/tm_lakehouse_pipeline.py`
-  - New: `orchestration/airflow/plugins/` (helpers/operators if needed)
+- New: `orchestration/airflow/dags/tm_lakehouse_pipeline.py`
+- New: `orchestration/airflow/plugins/` (helpers/operators if needed)
 - dbt project:
-  - New: `transformations/dbt_tagmarshal/` (models/tests/macros)
+- New: `transformations/dbt_tagmarshal/` (models/tests/macros)
 - Keep/reuse existing ETL code:
-  - [`/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/orchestration/dagster_project/assets/bronze.py`](/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/orchestration/dagster_project/assets/bronze.py)
-  - [`/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/orchestration/dagster_project/assets/silver.py`](/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/orchestration/dagster_project/assets/silver.py)
-  - [`/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/orchestration/dagster_project/assets/gold.py`](/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/orchestration/dagster_project/assets/gold.py)
-
-> During execution we’ll migrate logic from Dagster assets into Airflow tasks (and remove Dagster once parity is achieved).
-
-## Learning-by-building (how we’ll work together)
-
-- We’ll implement one vertical slice end-to-end first (one dataset → Bronze → Silver → one Gold model), then generalize.
-- Each PR/step will include:
-  - a short “what you learned” note (Airflow concept + dbt concept)
-  - one small exercise (e.g., add a dbt test, add an Airflow retry policy)
+- [`/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/orchestration/dagster_project/assets/bronze.py`](/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/orchestration/dagster_project/assets/bronze.py)
+- [`/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/orchestration/dagster_project/assets/silver.py`](/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/orchestration/dagster_project/assets/silver.py)
+- [`/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/orchestration/dagster_project/assets/gold.py`](/Users/karinlouw/Documents/Personal/Projects/github/tagmarshal_data_lakehouse/orchestration/dagster_project/assets/gold.py)

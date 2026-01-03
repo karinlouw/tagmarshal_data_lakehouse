@@ -6,7 +6,61 @@ default:
   @just --list
 
 up:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  
+  echo ""
+  echo "🚀 STARTING LAKEHOUSE STACK"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   docker compose --env-file config/local.env up -d
+  
+  echo ""
+  echo "⏳ Waiting for Airflow to initialize (this takes ~60-90 seconds)..."
+  echo "   (Installing dependencies, initializing database, creating admin user)"
+  echo ""
+  
+  # Wait for Airflow webserver to be ready (max 120 seconds)
+  for i in {1..24}; do
+    if curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health 2>/dev/null | grep -q "200"; then
+      echo "✅ Airflow is ready!"
+      break
+    fi
+    if [ $i -eq 24 ]; then
+      echo "⚠️  Airflow is still starting. Run 'just wait' to check again, or check logs with 'docker logs airflow'"
+      break
+    fi
+    printf "   [%02d/24] Waiting... " $i
+    # Show a hint of what's happening
+    STATUS=$(docker logs airflow --tail 1 2>/dev/null | head -c 60 || echo "starting...")
+    echo "$STATUS"
+    sleep 5
+  done
+  
+  echo ""
+  just ui
+
+# Wait for Airflow to be ready (use after 'just up' if Airflow wasn't ready)
+wait:
+  #!/usr/bin/env bash
+  echo ""
+  echo "⏳ WAITING FOR AIRFLOW"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  
+  for i in {1..30}; do
+    if curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health 2>/dev/null | grep -q "200"; then
+      echo ""
+      echo "✅ Airflow is ready! http://localhost:8080"
+      echo "   Login: admin / admin"
+      exit 0
+    fi
+    printf "   [%02d/30] " $i
+    docker logs airflow --tail 1 2>/dev/null | head -c 70 || echo "starting..."
+    sleep 5
+  done
+  
+  echo ""
+  echo "❌ Airflow didn't start in time. Check logs:"
+  echo "   docker logs airflow --tail 50"
 
 down:
   docker compose --env-file config/local.env down
@@ -62,11 +116,12 @@ nuke:
   docker compose --env-file config/local.env down -v --remove-orphans
   @echo "  Pruning Docker resources..."
   docker system prune -f
-  @echo "  Starting fresh..."
-  docker compose --env-file config/local.env up -d
   @echo ""
-  @echo "✅ Fresh start complete"
-  @just ui
+  @echo "✅ Nuke complete - all data deleted"
+  @echo ""
+  @echo "  To start fresh, run:"
+  @echo "    just up"
+  @echo ""
 
 # Show container health status
 health:
@@ -88,6 +143,43 @@ ui:
   @echo "  Spark     http://localhost:8082"
   @echo "  MinIO     http://localhost:9001"
   @echo ""
+
+# Open interactive Trino SQL shell
+trino:
+  @echo ""
+  @echo "🔷 TRINO SQL SHELL"
+  @echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  @echo "  Exit: Ctrl+D (or type 'quit' on empty line)"
+  @echo "  Try:  USE iceberg.silver;"
+  @echo ""
+  @docker exec -it trino trino
+
+# Run a Trino SQL query
+trino-query query:
+  @docker exec trino trino --execute "{{query}}" 2>&1 | grep -v "jline\|WARNING"
+
+# Check Trino health and status
+trino-status:
+  #!/usr/bin/env bash
+  echo ""
+  echo "🔷 TRINO STATUS"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  if docker ps | grep -q "trino.*healthy"; then
+    echo "  ✅ Trino is healthy and ready"
+  elif docker ps | grep -q "trino.*starting"; then
+    echo "  ⏳ Trino is starting up (wait ~3 min)"
+  elif docker ps | grep -q "trino"; then
+    echo "  ⚠️  Trino is running but not healthy yet"
+  else
+    echo "  ❌ Trino is not running"
+  fi
+  echo ""
+  INFO=$(curl -s http://localhost:8081/v1/info 2>/dev/null)
+  if [ -n "$INFO" ]; then
+    echo "  Info:"
+    echo "$INFO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'    Version: {d[\"nodeVersion\"][\"version\"]}'); print(f'    Starting: {d[\"starting\"]}'); print(f'    Uptime: {d[\"uptime\"]}')"
+  fi
+  echo ""
 
 # Show MinIO bucket structure (tree view)
 tree bucket="":
@@ -148,6 +240,11 @@ bronze-upload course_id local_path ingest_date="":
   INGEST_DATE="{{ingest_date}}"
   [ -z "$INGEST_DATE" ] && INGEST_DATE=$(date +%Y-%m-%d)
   
+  # Convert local path to container path
+  # data/file.csv → /opt/tagmarshal/input/file.csv
+  FILENAME=$(basename "{{local_path}}")
+  CONTAINER_PATH="/opt/tagmarshal/input/$FILENAME"
+  
   echo ""
   echo "📦 BRONZE UPLOAD"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -157,7 +254,7 @@ bronze-upload course_id local_path ingest_date="":
   echo ""
   echo "  ⏳ Triggering..."
   docker exec airflow airflow dags trigger bronze_ingest \
-    --conf '{"course_id":"{{course_id}}","local_path":"{{local_path}}","ingest_date":"'"$INGEST_DATE"'"}' \
+    --conf '{"course_id":"{{course_id}}","local_path":"'"$CONTAINER_PATH"'","ingest_date":"'"$INGEST_DATE"'"}' \
     2>&1 | grep -v "INFO\|WARNING\|__init__\|auth.backend" > /dev/null || true
   echo ""
   echo "✅ TRIGGERED"
@@ -165,16 +262,31 @@ bronze-upload course_id local_path ingest_date="":
   echo "  🔗 Monitor: http://localhost:8080/dags/bronze_ingest"
   echo ""
 
-# Upload ALL CSV files in data/ folder to Landing Zone
+# Upload ALL CSV and JSON files in data/ folder to Landing Zone
 bronze-upload-all ingest_date="":
   #!/usr/bin/env bash
   set -euo pipefail
   INGEST_DATE="${1:-$(date +%Y-%m-%d)}"
   
   echo ""
-  echo "📦 BRONZE UPLOAD"
+  echo "📦 BRONZE UPLOAD (ALL FILES)"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo "  Date: $INGEST_DATE"
+  echo ""
+  
+  # Wait for Airflow to be ready
+  echo "  ⏳ Checking Airflow..."
+  for i in {1..12}; do
+    if curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health 2>/dev/null | grep -q "200"; then
+      echo "  ✅ Airflow is ready"
+      break
+    fi
+    if [ $i -eq 12 ]; then
+      echo "  ❌ Airflow not ready. Run 'just wait' first."
+      exit 1
+    fi
+    sleep 5
+  done
   echo ""
   
   # Collect file info for summary
@@ -183,20 +295,43 @@ bronze-upload-all ingest_date="":
   declare -a rowcounts=()
   declare -a paths=()
   
+  # Process CSV files
   for file in data/*.csv; do
+    [ -f "$file" ] || continue
     filename=$(basename "$file")
     course_id=$(echo "$filename" | sed -E 's/\.rounds.*//; s/\..*//')
     container_path="/opt/tagmarshal/input/$filename"
     rows=$(($(wc -l < "$file") - 1))  # subtract header
     s3_path="s3://tm-lakehouse-landing-zone/course_id=$course_id/ingest_date=$INGEST_DATE/$filename"
     
-    # Store for summary
     courses+=("$course_id")
     filenames+=("$filename")
     rowcounts+=("$rows")
     paths+=("$s3_path")
     
-    echo "  ⏳ $course_id"
+    echo "  ⏳ $course_id (CSV)"
+    docker exec airflow airflow dags trigger bronze_ingest \
+      --conf "{\"course_id\":\"$course_id\",\"local_path\":\"$container_path\",\"ingest_date\":\"$INGEST_DATE\"}" \
+      2>&1 | grep -v "INFO\|WARNING\|__init__\|auth.backend" > /dev/null || true
+    sleep 1
+  done
+  
+  # Process JSON files
+  for file in data/*.json; do
+    [ -f "$file" ] || continue
+    filename=$(basename "$file")
+    course_id=$(echo "$filename" | sed -E 's/\.rounds.*//; s/\..*//')
+    container_path="/opt/tagmarshal/input/$filename"
+    # Count JSON array elements (rough estimate)
+    rows=$(grep -c '"_id"' "$file" 2>/dev/null || echo "?")
+    s3_path="s3://tm-lakehouse-landing-zone/course_id=$course_id/ingest_date=$INGEST_DATE/$filename"
+    
+    courses+=("$course_id")
+    filenames+=("$filename")
+    rowcounts+=("$rows")
+    paths+=("$s3_path")
+    
+    echo "  ⏳ $course_id (JSON)"
     docker exec airflow airflow dags trigger bronze_ingest \
       --conf "{\"course_id\":\"$course_id\",\"local_path\":\"$container_path\",\"ingest_date\":\"$INGEST_DATE\"}" \
       2>&1 | grep -v "INFO\|WARNING\|__init__\|auth.backend" > /dev/null || true
@@ -223,23 +358,58 @@ bronze-upload-all ingest_date="":
   echo ""
 
 # Process a single course through Silver ETL
-silver course_id ingest_date bronze_prefix:
+silver course_id ingest_date="":
   #!/usr/bin/env bash
   set -euo pipefail
+  
+  COURSE_ID="{{course_id}}"
   
   echo ""
   echo "⚙️  SILVER ETL"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo "  Course: {{course_id}}"
-  echo "  Date:   {{ingest_date}}"
-  echo "  Source: s3://tm-lakehouse-landing-zone/{{bronze_prefix}}"
-  echo ""
-  echo "  ⏳ Triggering..."
-  docker exec airflow airflow dags trigger silver_etl \
-    --conf '{"course_id":"{{course_id}}","ingest_date":"{{ingest_date}}","bronze_prefix":"{{bronze_prefix}}"}' \
-    2>&1 | grep -v "INFO\|WARNING\|__init__\|auth.backend" > /dev/null || true
-  echo ""
-  echo "✅ TRIGGERED"
+  echo "  Course: $COURSE_ID"
+  
+  if [ -n "{{ingest_date}}" ]; then
+    # Specific date provided - process only that date
+    INGEST_DATE="{{ingest_date}}"
+    BRONZE_PREFIX="course_id=$COURSE_ID/ingest_date=$INGEST_DATE/"
+    echo "  Date:   $INGEST_DATE"
+    echo "  Source: s3://tm-lakehouse-landing-zone/$BRONZE_PREFIX"
+    echo ""
+    echo "  ⏳ Triggering..."
+    docker exec airflow airflow dags trigger silver_etl \
+      --conf "{\"course_id\":\"$COURSE_ID\",\"ingest_date\":\"$INGEST_DATE\",\"bronze_prefix\":\"$BRONZE_PREFIX\"}" \
+      2>&1 | grep -v "INFO\|WARNING\|__init__\|auth.backend" > /dev/null || true
+    echo ""
+    echo "✅ TRIGGERED"
+  else
+    # No date - process ALL dates for this course
+    echo "  Date:   ALL (scanning MinIO for available dates)"
+    echo ""
+    
+    # Get all ingest_date folders for this course from MinIO
+    PYCMD='import boto3; s3 = boto3.client("s3", endpoint_url="http://minio:9000", aws_access_key_id="minioadmin", aws_secret_access_key="minioadmin"); result = s3.list_objects_v2(Bucket="tm-lakehouse-landing-zone", Prefix="course_id='"$COURSE_ID"'/ingest_date=", Delimiter="/"); [print(p["Prefix"].split("ingest_date=")[1].rstrip("/")) for p in result.get("CommonPrefixes", [])]'
+    DATES=$(docker exec airflow python3 -c "$PYCMD" 2>/dev/null)
+    
+    if [ -z "$DATES" ]; then
+      echo "  ❌ No data found for course '$COURSE_ID' in MinIO"
+      exit 1
+    fi
+    
+    COUNT=0
+    for INGEST_DATE in $DATES; do
+      BRONZE_PREFIX="course_id=$COURSE_ID/ingest_date=$INGEST_DATE/"
+      echo "  ⏳ $INGEST_DATE"
+      docker exec airflow airflow dags trigger silver_etl \
+        --conf "{\"course_id\":\"$COURSE_ID\",\"ingest_date\":\"$INGEST_DATE\",\"bronze_prefix\":\"$BRONZE_PREFIX\"}" \
+        2>&1 | grep -v "INFO\|WARNING\|__init__\|auth.backend" > /dev/null || true
+      COUNT=$((COUNT + 1))
+      sleep 0.5
+    done
+    echo ""
+    echo "✅ TRIGGERED $COUNT ETL job(s)"
+  fi
+  
   echo "  📍 Target: silver.fact_telemetry_event (Iceberg)"
   echo "  🔗 Monitor: http://localhost:8080/dags/silver_etl"
   echo ""
@@ -520,3 +690,98 @@ reset-local:
   @echo "✅ Local volumes wiped"
   @echo "  Run 'just up' to start fresh"
   @echo ""
+
+# ============================================================
+# BACKFILL COMMANDS (for massive data ingestion)
+# ============================================================
+
+# Show backfill status - what's done, what's pending, what failed
+backfill-status:
+  #!/usr/bin/env bash
+  echo ""
+  echo "📊 BACKFILL STATUS"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  echo "By Layer and Status:"
+  docker exec airflow-postgres psql -U airflow -d airflow -c "
+    SELECT layer, status, count(*) as jobs
+    FROM ingestion_log 
+    GROUP BY layer, status 
+    ORDER BY layer, status
+  " 2>&1 | grep -v "rows)"
+  echo ""
+  echo "Recent Failures:"
+  docker exec airflow-postgres psql -U airflow -d airflow -c "
+    SELECT course_id, ingest_date, layer, 
+           LEFT(error_message, 50) as error
+    FROM ingestion_log 
+    WHERE status = 'failed' 
+    ORDER BY completed_at DESC 
+    LIMIT 5
+  " 2>&1 | grep -v "rows)"
+  echo ""
+
+# Preview what would be processed (dry run)
+backfill-preview layer="silver":
+  #!/usr/bin/env bash
+  echo ""
+  echo "🔍 BACKFILL PREVIEW: {{layer}}"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  python3 scripts/backfill.py {{layer}} --dry-run
+  echo ""
+
+# Run Silver backfill (resumable)
+backfill-silver course_id="" batch_size="3":
+  #!/usr/bin/env bash
+  echo ""
+  echo "🔄 SILVER BACKFILL"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  
+  COURSE_ARG=""
+  if [ -n "{{course_id}}" ]; then
+    COURSE_ARG="--course {{course_id}}"
+  fi
+  
+  python3 scripts/backfill.py silver $COURSE_ARG --batch-size {{batch_size}}
+  echo ""
+
+# Retry all failed jobs
+backfill-retry layer="":
+  #!/usr/bin/env bash
+  echo ""
+  echo "🔄 RETRY FAILED JOBS"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  
+  LAYER_ARG=""
+  if [ -n "{{layer}}" ]; then
+    LAYER_ARG="--layer {{layer}}"
+  fi
+  
+  # Reset failed to pending
+  docker exec airflow-postgres psql -U airflow -d airflow -c "
+    UPDATE ingestion_log 
+    SET status = 'pending', retry_count = retry_count + 1
+    WHERE status = 'failed' $([ -n '{{layer}}' ] && echo \"AND layer = '{{layer}}'\")
+  " 2>&1 | grep -v "UPDATE"
+  
+  echo "✅ Failed jobs reset to pending"
+  echo "   Run 'just backfill-silver' to process them"
+  echo ""
+
+# Clear all backfill tracking (start fresh)
+backfill-reset:
+  #!/usr/bin/env bash
+  echo ""
+  echo "⚠️  RESET BACKFILL TRACKING"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  This clears all ingestion_log entries!"
+  echo ""
+  read -p "  Are you sure? (y/N) " confirm
+  if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+    docker exec airflow-postgres psql -U airflow -d airflow -c "TRUNCATE ingestion_log"
+    echo "✅ Backfill tracking cleared"
+  else
+    echo "Cancelled"
+  fi
+  echo ""
