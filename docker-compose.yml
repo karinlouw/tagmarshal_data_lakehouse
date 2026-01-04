@@ -1,6 +1,12 @@
 name: tagmarshal-lakehouse
 
+# =============================================================================
+# STORAGE LAYER (S3-compatible object storage)
+# =============================================================================
+
 services:
+  # MinIO: Local S3-compatible storage (replaces AWS S3 for local dev)
+  # Port 9000 = API, Port 9001 = Web console
   minio:
     image: minio/minio:latest
     container_name: minio
@@ -9,16 +15,18 @@ services:
       MINIO_ROOT_USER: ${TM_S3_ACCESS_KEY:-minioadmin}
       MINIO_ROOT_PASSWORD: ${TM_S3_SECRET_KEY:-minioadmin}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "9000:9000" # S3 API
+      - "9001:9001" # Web UI
     volumes:
-      - minio_data:/data
+      - minio_data:/data # Persistent storage for buckets
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/ready" ]
       interval: 5s
       timeout: 3s
       retries: 20
 
+  # MinIO Client: Creates buckets on startup (one-time setup)
+  # Runs after MinIO is healthy, then exits
   minio-init:
     image: minio/mc:latest
     container_name: minio-init
@@ -46,7 +54,12 @@ services:
         echo "[SUCCESS] MinIO buckets created:"
         mc ls local/
 
-  # Iceberg REST Catalog - configured for MinIO
+  # =============================================================================
+  # TABLE FORMAT & CATALOG (Apache Iceberg)
+  # =============================================================================
+
+  # Iceberg REST Catalog: Manages Iceberg table metadata (schemas, partitions, snapshots)
+  # In AWS production, this would be Glue Data Catalog instead
   iceberg-rest:
     image: tabulario/iceberg-rest:latest
     container_name: iceberg-rest
@@ -63,11 +76,20 @@ services:
       AWS_ACCESS_KEY_ID: ${TM_S3_ACCESS_KEY:-minioadmin}
       AWS_SECRET_ACCESS_KEY: ${TM_S3_SECRET_KEY:-minioadmin}
     ports:
-      - "8181:8181"
+      - "8181:8181" # REST API for catalog operations
 
-  # Spark runtime for ETL
+  # =============================================================================
+  # ETL ENGINE (Apache Spark)
+  # =============================================================================
+
+  # Spark Master: Coordinates Spark jobs (Silver ETL runs here)
+  # Port 7077 = Master API, Port 8082 = Spark UI
+  # Custom image with pre-baked AWS/Iceberg JARs (no runtime downloads!)
   spark:
-    image: apache/spark:3.5.0
+    build:
+      context: ./infrastructure/docker/spark
+      dockerfile: Dockerfile
+    image: tagmarshal-spark:3.5.0
     container_name: spark
     environment:
       SPARK_MASTER_HOST: spark
@@ -77,14 +99,19 @@ services:
       - -c
       - /opt/spark/sbin/start-master.sh && tail -f /opt/spark/logs/*
     ports:
-      - "7077:7077"
-      - "8082:8080"
+      - "7077:7077" # Master API
+      - "8082:8080" # Spark UI
     volumes:
-      - ./jobs:/opt/tagmarshal/jobs:ro
-      - ./data:/opt/tagmarshal/input:ro
+      - ./jobs:/opt/tagmarshal/jobs:ro # Read-only: Spark ETL scripts
+      - ./data:/opt/tagmarshal/input:ro # Read-only: Input CSV/JSON files
 
+  # Spark Worker: Executes Spark tasks (optional for local dev)
+  # Connects to master to run distributed jobs
   spark-worker:
-    image: apache/spark:3.5.0
+    build:
+      context: ./infrastructure/docker/spark
+      dockerfile: Dockerfile
+    image: tagmarshal-spark:3.5.0
     container_name: spark-worker
     depends_on:
       - spark
@@ -98,17 +125,27 @@ services:
       - ./jobs:/opt/tagmarshal/jobs:ro
       - ./data:/opt/tagmarshal/input:ro
 
-  # Trino for interactive SQL against Iceberg
+  # =============================================================================
+  # SQL QUERY ENGINE (Trino)
+  # =============================================================================
+
+  # Trino: SQL query engine for Iceberg tables (replaces AWS Athena in local dev)
+  # Allows interactive SQL queries against Silver/Gold tables
   trino:
     image: trinodb/trino:455
     container_name: trino
     depends_on:
       - iceberg-rest
     ports:
-      - "8081:8080"
+      - "8081:8080" # Trino UI and API
     volumes:
-      - ./infrastructure/services/trino/etc:/etc/trino:ro
+      - ./infrastructure/services/trino/etc:/etc/trino:ro # Catalog config
 
+  # =============================================================================
+  # ORCHESTRATION (Apache Airflow)
+  # =============================================================================
+
+  # PostgreSQL: Airflow metadata database (stores DAG runs, task history, connections)
   postgres:
     image: postgres:16
     container_name: airflow-postgres
@@ -117,12 +154,14 @@ services:
       POSTGRES_PASSWORD: ${TM_POSTGRES_PASSWORD:-airflow}
       POSTGRES_DB: ${TM_POSTGRES_DB:-airflow}
     ports:
-      - "5432:5432"
+      - "5432:5432" # PostgreSQL port
     volumes:
-      - airflow_pg:/var/lib/postgresql/data
-      # Auto-run migrations on first startup
+      - airflow_pg:/var/lib/postgresql/data # Persistent DB storage
+      # Auto-run migrations on first startup (creates ingestion_log table)
       - ./infrastructure/database:/docker-entrypoint-initdb.d:ro
 
+  # Airflow: Orchestrates the data pipeline (Bronze → Silver → Gold)
+  # Port 8080 = Airflow UI (admin/admin)
   airflow:
     image: apache/airflow:2.10.3-python3.11
     container_name: airflow
@@ -131,19 +170,20 @@ services:
       - spark
       - trino
     environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      # Airflow core config
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor # Runs tasks in same container
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${TM_POSTGRES_USER:-airflow}:${TM_POSTGRES_PASSWORD:-airflow}@postgres:5432/${TM_POSTGRES_DB:-airflow}
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
       AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
       PYTHONWARNINGS: "ignore::FutureWarning,ignore::UserWarning"
       AIRFLOW__WEBSERVER__RATE_LIMIT_ENABLED: "false"
-      PYTHONPATH: /opt/tagmarshal/jobs/spark/lib
-      # Airflow admin user
+      PYTHONPATH: /opt/tagmarshal/jobs/spark/lib # So Airflow can import tm_lakehouse
+      # Airflow admin user (created on first startup)
       TM_AIRFLOW_ADMIN_USERNAME: ${TM_AIRFLOW_ADMIN_USERNAME:-admin}
       TM_AIRFLOW_ADMIN_PASSWORD: ${TM_AIRFLOW_ADMIN_PASSWORD:-admin}
       TM_AIRFLOW_ADMIN_EMAIL: ${TM_AIRFLOW_ADMIN_EMAIL:-admin@example.com}
-      # Tagmarshal env vars
+      # Tagmarshal env vars (passed to DAGs and Spark jobs)
       TM_ENV: ${TM_ENV:-local}
       TM_BUCKET_LANDING: ${TM_BUCKET_LANDING:-tm-lakehouse-landing-zone}
       TM_BUCKET_SOURCE: ${TM_BUCKET_SOURCE:-tm-lakehouse-source-store}
@@ -163,23 +203,30 @@ services:
       TM_DB_GOLD: ${TM_DB_GOLD:-gold}
       TM_OBS_PREFIX: ${TM_OBS_PREFIX:-}
       TM_LOCAL_INPUT_DIR: ${TM_LOCAL_INPUT_DIR:-/opt/tagmarshal/input}
-      # Registry database
+      # Spark configuration (environment-specific tuning)
+      TM_SPARK_MASTER: ${TM_SPARK_MASTER:-local[2]}
+      TM_SPARK_DRIVER_MEMORY: ${TM_SPARK_DRIVER_MEMORY:-1g}
+      TM_SPARK_EXECUTOR_MEMORY: ${TM_SPARK_EXECUTOR_MEMORY:-1g}
+      TM_SPARK_SHUFFLE_PARTITIONS: ${TM_SPARK_SHUFFLE_PARTITIONS:-8}
+      TM_SPARK_ADAPTIVE_ENABLED: ${TM_SPARK_ADAPTIVE_ENABLED:-true}
+      TM_SPARK_UI_ENABLED: ${TM_SPARK_UI_ENABLED:-false}
+      # Registry database (for ingestion tracking)
       TM_POSTGRES_HOST: postgres
       TM_POSTGRES_PORT: "5432"
       TM_POSTGRES_DB: ${TM_POSTGRES_DB:-airflow}
       TM_POSTGRES_USER: ${TM_POSTGRES_USER:-airflow}
       TM_POSTGRES_PASSWORD: ${TM_POSTGRES_PASSWORD:-airflow}
     volumes:
-      - ./orchestration/airflow/dags:/opt/airflow/dags
-      - ./orchestration/airflow/logs:/opt/airflow/logs
+      - ./orchestration/airflow/dags:/opt/airflow/dags # DAG definitions
+      - ./orchestration/airflow/logs:/opt/airflow/logs # Task logs
       - ./orchestration/airflow/plugins:/opt/airflow/plugins
       - ./orchestration/airflow/requirements.txt:/opt/airflow/requirements.txt:ro
-      - ./jobs:/opt/tagmarshal/jobs:ro
-      - ./transform:/opt/tagmarshal/transform
-      - ./data:/opt/tagmarshal/input:ro
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ./jobs:/opt/tagmarshal/jobs:ro # Spark ETL scripts
+      - ./transform:/opt/tagmarshal/transform # dbt project
+      - ./data:/opt/tagmarshal/input:ro # Input CSV/JSON files
+      - /var/run/docker.sock:/var/run/docker.sock # Allows Airflow to exec Docker commands
     ports:
-      - "8080:8080"
+      - "8080:8080" # Airflow UI
     entrypoint: /bin/bash
     command:
       - -c
@@ -195,7 +242,12 @@ services:
         echo "[SUCCESS] Airflow initialized. Starting webserver and scheduler..."
         (airflow webserver &) && exec airflow scheduler
 
-  # Apache Superset for dashboards
+  # =============================================================================
+  # VISUALIZATION (Apache Superset)
+  # =============================================================================
+
+  # Superset: BI dashboard tool (connects to Trino to visualize Gold tables)
+  # Port 8088 = Superset UI (admin/admin)
   superset:
     image: apache/superset:3.1.0
     container_name: superset
@@ -208,9 +260,9 @@ services:
       # Use SQLite for simplicity (PostgreSQL for production)
       SQLALCHEMY_DATABASE_URI: sqlite:////app/superset_home/superset.db
     ports:
-      - "8088:8088"
+      - "8088:8088" # Superset UI
     volumes:
-      - superset_home:/app/superset_home
+      - superset_home:/app/superset_home # Persistent storage for dashboards
     entrypoint: /bin/bash
     command:
       - -c
@@ -226,7 +278,11 @@ services:
         echo "[SUCCESS] Superset ready. Starting server..."
         superset run -h 0.0.0.0 -p 8088 --with-threads --reload
 
+# =============================================================================
+# PERSISTENT VOLUMES (Data survives container restarts)
+# =============================================================================
+
 volumes:
-  minio_data:
-  airflow_pg:
-  superset_home:
+  minio_data: # MinIO bucket data
+  airflow_pg: # Airflow metadata database
+  superset_home: # Superset dashboards and config

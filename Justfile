@@ -39,6 +39,11 @@ up:
   echo ""
   just ui
 
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "💡 Run 'just verify' to check all dependencies are ready"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
 # Wait for Airflow to be ready (use after 'just up' if Airflow wasn't ready)
 wait:
   #!/usr/bin/env bash
@@ -130,6 +135,120 @@ health:
   @echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   @docker compose --env-file config/local.env ps
   @echo ""
+
+# Verify all services and dependencies are ready (run before bronze/silver)
+verify:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  
+  echo ""
+  echo "🔍 VERIFYING LAKEHOUSE STACK"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  
+  ERRORS=0
+  
+  # 1. Check containers are running
+  echo "📦 Checking containers..."
+  for container in spark spark-worker minio airflow trino iceberg-rest; do
+    if docker ps --filter "name=^${container}$" --filter "status=running" -q | grep -q .; then
+      printf "   ✅ %s\n" "$container"
+    else
+      printf "   ❌ %s (not running)\n" "$container"
+      ERRORS=$((ERRORS + 1))
+    fi
+  done
+  echo ""
+  
+  # 2. Check Spark has pre-baked JARs
+  echo "📚 Checking Spark dependencies (pre-baked JARs)..."
+  JARS=$(docker exec spark ls /opt/spark/extra-jars/ 2>/dev/null | wc -l || echo "0")
+  if [ "$JARS" -ge 6 ]; then
+    echo "   ✅ Found $JARS pre-baked JARs in /opt/spark/extra-jars/"
+    docker exec spark ls -lh /opt/spark/extra-jars/ 2>/dev/null | tail -6 | while read line; do
+      echo "      $line"
+    done
+  else
+    echo "   ❌ Missing pre-baked JARs! Run: just rebuild"
+    echo "      Expected 6+ JARs in /opt/spark/extra-jars/"
+    ERRORS=$((ERRORS + 1))
+  fi
+  echo ""
+  
+  # 3. Check MinIO is accessible and buckets exist
+  echo "🪣 Checking MinIO buckets..."
+  docker exec minio mc alias set myminio http://localhost:9000 minioadmin minioadmin > /dev/null 2>&1 || true
+  for bucket in tm-lakehouse-landing-zone tm-lakehouse-source-store tm-lakehouse-serve; do
+    if docker exec minio mc ls myminio/$bucket/ > /dev/null 2>&1; then
+      printf "   ✅ %s\n" "$bucket"
+    else
+      printf "   ❌ %s (not found)\n" "$bucket"
+      ERRORS=$((ERRORS + 1))
+    fi
+  done
+  echo ""
+  
+  # 4. Check Airflow is healthy
+  echo "🌬️ Checking Airflow..."
+  if curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health 2>/dev/null | grep -q "200"; then
+    echo "   ✅ Airflow API is healthy"
+    # Check DAGs are loaded
+    DAGS=$(docker exec airflow airflow dags list 2>&1 | grep -c "_" || echo "0")
+    echo "   ✅ $DAGS DAGs loaded"
+  else
+    echo "   ❌ Airflow not ready (run: just wait)"
+    ERRORS=$((ERRORS + 1))
+  fi
+  echo ""
+  
+  # 5. Check Trino is healthy
+  echo "🔷 Checking Trino..."
+  if curl -s http://localhost:8081/v1/info 2>/dev/null | grep -q "starting.*false"; then
+    echo "   ✅ Trino is ready"
+    # Check Iceberg catalog
+    if docker exec trino trino --execute "SHOW SCHEMAS FROM iceberg" 2>&1 | grep -q "silver\|default"; then
+      echo "   ✅ Iceberg catalog connected"
+    else
+      echo "   ⚠️  Iceberg catalog may need initialization"
+    fi
+  else
+    echo "   ❌ Trino not ready"
+    ERRORS=$((ERRORS + 1))
+  fi
+  echo ""
+  
+  # 6. Verify JARs are valid (not corrupted)
+  echo "⚡ Verifying JAR integrity..."
+  JAR_SIZE=$(docker exec spark du -sm /opt/spark/extra-jars/ 2>/dev/null | cut -f1 || echo "0")
+  if [ "$JAR_SIZE" -ge 700 ]; then
+    echo "   ✅ JAR directory size: ${JAR_SIZE}MB (expected: ~740MB)"
+    echo "   ✅ All pre-baked JARs verified"
+  else
+    echo "   ❌ JAR directory too small: ${JAR_SIZE}MB (expected: ~740MB)"
+    echo "      The JARs may be corrupted. Run: just rebuild"
+    ERRORS=$((ERRORS + 1))
+  fi
+  echo ""
+  
+  # Summary
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  if [ "$ERRORS" -eq 0 ]; then
+    echo "✅ ALL CHECKS PASSED - Ready to run pipeline!"
+    echo ""
+    echo "   Next steps:"
+    echo "     just bronze-upload-all    # Upload CSV files to Landing Zone"
+    echo "     just silver-all           # Transform to Iceberg tables"
+    echo "     just gold                 # Build Gold aggregations"
+    echo ""
+  else
+    echo "❌ $ERRORS CHECK(S) FAILED"
+    echo ""
+    echo "   To fix:"
+    echo "     just rebuild              # Rebuild containers with dependencies"
+    echo "     just up                   # Or restart the stack"
+    echo ""
+    exit 1
+  fi
 
 logs:
   docker compose --env-file config/local.env logs -f --tail=200
@@ -348,6 +467,113 @@ bucket-sizes:
   done
   echo ""
 
+# View a file from MinIO (CSV, JSON, or text files)
+# Usage: just view <bucket>/<path/to/file>
+# Examples:
+#   just view tm-lakehouse-landing-zone/course_id=americanfalls/ingest_date=2026-01-04/americanfalls.rounds.csv
+#   just view tm-lakehouse-observability/gold/run_id=20260104T135009Z/summary.json
+view path:
+  #!/usr/bin/env bash
+  
+  # Ensure MinIO alias exists
+  docker exec minio mc alias set myminio http://localhost:9000 minioadmin minioadmin 2>/dev/null
+  
+  FILE_PATH="{{path}}"
+  
+  # Check if file exists
+  if ! docker exec minio mc stat "myminio/$FILE_PATH" >/dev/null 2>&1; then
+    echo "❌ File not found: $FILE_PATH"
+    echo ""
+    echo "💡 Try listing files first:"
+    echo "   just ls tm-lakehouse-landing-zone"
+    echo "   just ls tm-lakehouse-observability/gold"
+    exit 1
+  fi
+  
+  # Get file extension
+  EXT="${FILE_PATH##*.}"
+  
+  case "$EXT" in
+    json)
+      # Pretty-print JSON
+      docker exec minio mc cat "myminio/$FILE_PATH" | python3 -m json.tool
+      ;;
+    csv)
+      # Show CSV sample: header + first 5 rows, truncated to 120 chars per line
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo "📄 $FILE_PATH"
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo ""
+      # Download to temp file to avoid SIGPIPE issues
+      TMPFILE=$(mktemp)
+      docker exec minio mc cat "myminio/$FILE_PATH" > "$TMPFILE" 2>/dev/null
+      # Show first 6 lines truncated
+      head -6 "$TMPFILE" | cut -c1-120 | sed 's/$/.../g'
+      echo ""
+      LINES=$(wc -l < "$TMPFILE")
+      COLS=$(head -1 "$TMPFILE" | tr ',' '\n' | wc -l)
+      rm -f "$TMPFILE"
+      echo "📊 File stats: $LINES rows × $COLS columns"
+      echo "💡 Use 'just view-all {{path}}' to see entire file"
+      ;;
+    *)
+      # Default: show raw content (first 20 lines, truncated)
+      docker exec minio mc cat "myminio/$FILE_PATH" 2>/dev/null | head -20 | cut -c1-200 || true
+      ;;
+  esac
+
+# View entire file from MinIO (no line limit)
+view-all path:
+  #!/usr/bin/env bash
+  docker exec minio mc alias set myminio http://localhost:9000 minioadmin minioadmin 2>/dev/null
+  docker exec minio mc cat "myminio/{{path}}"
+
+# List files in a MinIO path
+# Usage: just ls <bucket> or just ls <bucket>/<prefix>
+# Examples:
+#   just ls tm-lakehouse-landing-zone
+#   just ls tm-lakehouse-observability/gold
+ls path="":
+  #!/usr/bin/env bash
+  docker exec minio mc alias set myminio http://localhost:9000 minioadmin minioadmin 2>/dev/null
+  
+  if [ -z "{{path}}" ]; then
+    echo ""
+    echo "📦 MINIO BUCKETS"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    docker exec minio mc ls myminio/
+    echo ""
+    echo "💡 Use 'just ls <bucket>' to list contents"
+  else
+    echo ""
+    echo "📁 {{path}}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    docker exec minio mc ls "myminio/{{path}}/" --recursive | head -50
+    TOTAL=$(docker exec minio mc ls "myminio/{{path}}/" --recursive 2>/dev/null | wc -l)
+    if [ "$TOTAL" -gt 50 ]; then
+      echo ""
+      echo "... (showing first 50 of $TOTAL files)"
+    fi
+  fi
+
+# View latest Gold observability summary
+gold-obs:
+  #!/usr/bin/env bash
+  docker exec minio mc alias set myminio http://localhost:9000 minioadmin minioadmin 2>/dev/null
+  
+  LATEST=$(docker exec minio mc ls myminio/tm-lakehouse-observability/gold/ --recursive 2>/dev/null | grep summary.json | tail -1 | awk '{print $NF}')
+  
+  if [ -z "$LATEST" ]; then
+    echo "❌ No Gold observability data found"
+    echo "💡 Run 'just gold' first to generate observability data"
+    exit 1
+  fi
+  
+  echo ""
+  echo "📊 LATEST GOLD RUN"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  docker exec minio mc cat "myminio/tm-lakehouse-observability/gold/$LATEST" | python3 -m json.tool
+
 # Upload a single file to Landing Zone
 bronze-upload course_id local_path ingest_date="":
   #!/usr/bin/env bash
@@ -529,56 +755,188 @@ silver course_id ingest_date="":
   echo "  🔗 Monitor: http://localhost:8080/dags/silver_etl"
   echo ""
 
-# Process ALL courses through Silver ETL (after bronze-upload-all)
+# Process ALL courses through Silver ETL
+# Mode (sequential/parallel) is controlled by TM_PIPELINE_MODE in config/local.env
 silver-all ingest_date="":
   #!/usr/bin/env bash
   set -euo pipefail
   INGEST_DATE="${1:-$(date +%Y-%m-%d)}"
   
+  # Read pipeline mode from config (default: sequential for local dev)
+  PIPELINE_MODE=$(grep "^TM_PIPELINE_MODE=" config/local.env 2>/dev/null | cut -d= -f2 || echo "sequential")
+  
   echo ""
   echo "⚙️  SILVER ETL"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo "  Date: $INGEST_DATE"
+  echo "  Mode: $PIPELINE_MODE"
   echo ""
   
-  # Collect course info for summary
+  # Get unique courses from CSV files
   declare -a courses=()
-  declare -a landing_paths=()
-  
   for file in data/*.csv; do
     filename=$(basename "$file")
     course_id=$(echo "$filename" | sed -E 's/\.rounds.*//; s/\..*//')
-    bronze_prefix="course_id=$course_id/ingest_date=$INGEST_DATE/"
-    landing_path="s3://tm-lakehouse-landing-zone/$bronze_prefix"
-    
-    # Store for summary
-    courses+=("$course_id")
-    landing_paths+=("$landing_path")
-    
-    echo "  ⏳ $course_id"
-    docker exec airflow airflow dags trigger silver_etl \
-      --conf "{\"course_id\":\"$course_id\",\"ingest_date\":\"$INGEST_DATE\",\"bronze_prefix\":\"$bronze_prefix\"}" \
-      2>&1 | grep -v "INFO\|WARNING\|__init__\|auth.backend" > /dev/null || true
-    sleep 1
+    # Only add if not already in array (avoid duplicates)
+    if [[ ! " ${courses[*]:-} " =~ " ${course_id} " ]]; then
+      courses+=("$course_id")
+    fi
   done
   
-  # Summary table
+  TOTAL=${#courses[@]}
+  echo "  📋 Found $TOTAL unique courses"
   echo ""
-  echo "✅ TRIGGERED ${#courses[@]} ETL JOBS"
+  
+  START_TIME=$(date +%s)
+  COMPLETED=0
+  FAILED=0
+  
+  if [ "$PIPELINE_MODE" = "sequential" ]; then
+    # SEQUENTIAL: Trigger one job, wait for completion, then next
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    
+    for i in "${!courses[@]}"; do
+      course_id="${courses[$i]}"
+    bronze_prefix="course_id=$course_id/ingest_date=$INGEST_DATE/"
+      
+      echo ""
+      echo "  [$((i+1))/$TOTAL] $course_id"
+      
+      JOB_START=$(date +%s)
+      
+      # Trigger job
+      OUTPUT=$(docker exec airflow airflow dags trigger silver_etl \
+      --conf "{\"course_id\":\"$course_id\",\"ingest_date\":\"$INGEST_DATE\",\"bronze_prefix\":\"$bronze_prefix\"}" \
+        2>&1 || echo "")
+      
+      # Extract run_id from output (format: manual__2026-01-04T13:14:46+00:00)
+      RUN_ID=$(echo "$OUTPUT" | grep -o "manual__[0-9T:+-]*" | head -1 || echo "")
+      
+      if [ -z "$RUN_ID" ]; then
+        echo "     ❌ Failed to trigger"
+        FAILED=$((FAILED + 1))
+        continue
+      fi
+      
+      # Wait for this job to complete
+      echo -n "     ⏳ Running"
+      while true; do
+        STATE=$(docker exec airflow airflow dags list-runs -d silver_etl -o plain 2>&1 | \
+          grep "$RUN_ID" | awk '{print $3}' | head -1 || echo "running")
+        
+        if [ "$STATE" = "success" ]; then
+          JOB_END=$(date +%s)
+          JOB_TIME=$((JOB_END - JOB_START))
+          echo ""
+          echo "     ✅ Done in ${JOB_TIME}s"
+          COMPLETED=$((COMPLETED + 1))
+          break
+        elif [ "$STATE" = "failed" ]; then
+          JOB_END=$(date +%s)
+          JOB_TIME=$((JOB_END - JOB_START))
+          echo ""
+          echo "     ❌ FAILED after ${JOB_TIME}s"
+          FAILED=$((FAILED + 1))
+          break
+        fi
+        echo -n "."
+        sleep 5
+      done
+    done
+    
+  else
+    # PARALLEL: Trigger all jobs, then monitor progress
+    declare -a run_ids=()
+    declare -a statuses=()
+    
+    echo "  🚀 Triggering all jobs..."
+    for i in "${!courses[@]}"; do
+      course_id="${courses[$i]}"
+      bronze_prefix="course_id=$course_id/ingest_date=$INGEST_DATE/"
+      
+      OUTPUT=$(docker exec airflow airflow dags trigger silver_etl \
+        --conf "{\"course_id\":\"$course_id\",\"ingest_date\":\"$INGEST_DATE\",\"bronze_prefix\":\"$bronze_prefix\"}" \
+        2>&1 || echo "")
+      
+      # Extract run_id from output (format: manual__2026-01-04T13:14:46+00:00)
+      RUN_ID=$(echo "$OUTPUT" | grep -o "manual__[0-9T:+-]*" | head -1 || echo "unknown_$i")
+      run_ids+=("$RUN_ID")
+      statuses+=("running")
+      
+      echo "     ⏳ $course_id"
+      sleep 0.5
+    done
+    
   echo ""
-  echo "┌────────────────────┬──────────────────────────────────────────────────────┐"
-  echo "│ Course             │ Landing Zone Source                                  │"
-  echo "├────────────────────┼──────────────────────────────────────────────────────┤"
+    echo "  ✅ All $TOTAL jobs triggered"
+  echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  📊 PROGRESS (updating every 10s)"
+    echo ""
+    
+    # Monitor until all complete
+    while [ $((COMPLETED + FAILED)) -lt $TOTAL ]; do
   for i in "${!courses[@]}"; do
-    printf "│ %-18s │ %-52s │\n" "${courses[$i]}" "${landing_paths[$i]:0:52}"
+        if [ "${statuses[$i]}" = "running" ]; then
+          course_id="${courses[$i]}"
+          run_id="${run_ids[$i]}"
+          
+          STATE=$(docker exec airflow airflow dags list-runs -d silver_etl -o plain 2>&1 | \
+            grep "$run_id" | awk '{print $3}' | head -1 || echo "running")
+          
+          if [ "$STATE" = "success" ]; then
+            statuses[$i]="success"
+            ELAPSED=$(($(date +%s) - START_TIME))
+            COMPLETED=$((COMPLETED + 1))
+            echo "     ✅ $course_id completed (${ELAPSED}s elapsed)"
+          elif [ "$STATE" = "failed" ]; then
+            statuses[$i]="failed"
+            ELAPSED=$(($(date +%s) - START_TIME))
+            FAILED=$((FAILED + 1))
+            echo "     ❌ $course_id FAILED (${ELAPSED}s elapsed)"
+          fi
+        fi
+      done
+      
+      RUNNING=$((TOTAL - COMPLETED - FAILED))
+      if [ $RUNNING -gt 0 ]; then
+        ELAPSED=$(($(date +%s) - START_TIME))
+        printf "\r     ⏳ %d running, %d done, %d failed (%dm %ds)  " \
+          $RUNNING $COMPLETED $FAILED $((ELAPSED / 60)) $((ELAPSED % 60))
+        sleep 10
+      fi
+    done
+  echo ""
+  fi
+  
+  END_TIME=$(date +%s)
+  TOTAL_TIME=$((END_TIME - START_TIME))
+  
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  ✅ SILVER ETL COMPLETE"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  echo "  📊 Summary:"
+  echo "     Total:     $TOTAL courses"
+  echo "     Success:   $COMPLETED"
+  echo "     Failed:    $FAILED"
+  echo "     Duration:  ${TOTAL_TIME}s (~$((TOTAL_TIME / 60))m $((TOTAL_TIME % 60))s)"
+  echo ""
+  
+  # Show row counts from Trino
+  echo "  📈 Row Counts:"
+  docker exec trino trino --execute \
+    "SELECT course_id, count(*) as rows FROM iceberg.silver.fact_telemetry_event GROUP BY course_id ORDER BY course_id" \
+    2>&1 | grep -v "jline\|WARNING" | while read line; do
+    echo "     $line"
   done
-  echo "└────────────────────┴──────────────────────────────────────────────────────┘"
   echo ""
-  echo "📍 Storage Locations:"
-  echo "   Table:  silver.fact_telemetry_event (Iceberg)"
-  echo "   MinIO:  http://localhost:9001/browser/tm-lakehouse-source-store/warehouse/silver/"
+  echo "  📍 Locations:"
+  echo "     Table: iceberg.silver.fact_telemetry_event"
+  echo "     MinIO: http://localhost:9001/browser/tm-lakehouse-source-store/warehouse/silver/"
   echo ""
-  echo "🔗 Monitor: http://localhost:8080/dags/silver_etl"
+  echo "  💡 Config: TM_PIPELINE_MODE=$PIPELINE_MODE (config/local.env)"
   echo ""
 
 # Run Gold dbt models
@@ -590,21 +948,72 @@ gold:
   echo "🏆 GOLD DBT MODELS"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo ""
-  echo "  ⏳ Triggering..."
-  docker exec airflow airflow dags trigger gold_dbt \
-    2>&1 | grep -v "INFO\|WARNING\|__init__\|auth.backend" > /dev/null || true
-  echo ""
-  echo "✅ TRIGGERED"
-  echo ""
-  echo "  Models:"
+  echo "  Models to build:"
   echo "    • gold.pace_summary_by_round"
   echo "    • gold.signal_quality_rounds"
   echo "    • gold.device_health_errors"
   echo ""
-  echo "📍 Storage Locations:"
-  echo "   MinIO: http://localhost:9001/browser/tm-lakehouse-serve/warehouse/gold/"
+  
+  START_TIME=$(date +%s)
+  
+  # Trigger gold_dbt DAG and capture run_id
+  echo "  🚀 Triggering dbt models..."
+  OUTPUT=$(docker exec airflow airflow dags trigger gold_dbt 2>&1 || echo "")
+  
+  # Extract run_id from output (format: manual__2026-01-04T13:14:46+00:00)
+  RUN_ID=$(echo "$OUTPUT" | grep -o "manual__[0-9T:+-]*" | head -1 || echo "")
+  
+  if [ -z "$RUN_ID" ]; then
+    echo "  ❌ Failed to trigger gold_dbt DAG"
+    exit 1
+  fi
+  
+  echo "  ✅ Triggered (run_id: ${RUN_ID:0:35}...)"
   echo ""
-  echo "🔗 Monitor: http://localhost:8080/dags/gold_dbt"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo -n "  ⏳ Running"
+  
+  # Wait for completion
+  while true; do
+    STATE=$(docker exec airflow airflow dags list-runs -d gold_dbt -o plain 2>&1 | \
+      grep "$RUN_ID" | awk '{print $3}' | head -1 || echo "running")
+    
+    if [ "$STATE" = "success" ]; then
+      END_TIME=$(date +%s)
+      DURATION=$((END_TIME - START_TIME))
+      echo ""
+      echo "  ✅ Done in ${DURATION}s"
+      break
+    elif [ "$STATE" = "failed" ]; then
+      END_TIME=$(date +%s)
+      DURATION=$((END_TIME - START_TIME))
+      echo ""
+      echo "  ❌ FAILED after ${DURATION}s"
+      echo ""
+      echo "  Check logs: http://localhost:8080/dags/gold_dbt/grid"
+      exit 1
+    fi
+    echo -n "."
+    sleep 5
+  done
+  
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  ✅ GOLD BUILD COMPLETE"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  
+  # Show row counts for gold tables
+  echo "  📈 Gold Table Row Counts:"
+  for table in pace_summary_by_round signal_quality_rounds device_health_errors; do
+    ROWS=$(docker exec trino trino --execute \
+      "SELECT count(*) FROM iceberg.gold.$table" 2>&1 | grep -v "jline\|WARNING" | tr -d '"' || echo "?")
+    echo "     $table: $ROWS rows"
+  done
+  echo ""
+  echo "  📍 Locations:"
+  echo "     MinIO: http://localhost:9001/browser/tm-lakehouse-serve/warehouse/gold/"
+  echo "     Query: SELECT * FROM iceberg.gold.pace_summary_by_round"
   echo ""
 
 # Full pipeline: Bronze → Silver → Gold for all files

@@ -1,13 +1,38 @@
-"""Silver ETL DAG - Spark job to transform Landing Zone CSV → Iceberg."""
+"""Silver ETL DAG - Spark job to transform Landing Zone CSV → Iceberg.
+
+Configuration is driven by environment variables (see config/local.env and config/aws.env):
+- TM_SPARK_MASTER: Spark master mode (local[N], yarn, etc.)
+- TM_SPARK_DRIVER_MEMORY: Driver memory allocation
+- TM_SPARK_EXECUTOR_MEMORY: Executor memory allocation  
+- TM_SPARK_SHUFFLE_PARTITIONS: Number of shuffle partitions
+- TM_SPARK_ADAPTIVE_ENABLED: Enable adaptive query execution
+- TM_SPARK_UI_ENABLED: Enable/disable Spark UI
+"""
 
 from __future__ import annotations
 
+import os
 import subprocess
 from datetime import datetime
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
+
+
+# =============================================================================
+# SPARK CONFIGURATION (read from environment with sensible defaults)
+# =============================================================================
+# These values come from config/local.env or config/aws.env
+# Defaults are conservative for local development
+SPARK_CONFIG = {
+    "master": os.getenv("TM_SPARK_MASTER", "local[2]"),
+    "driver_memory": os.getenv("TM_SPARK_DRIVER_MEMORY", "1g"),
+    "executor_memory": os.getenv("TM_SPARK_EXECUTOR_MEMORY", "1g"),
+    "shuffle_partitions": os.getenv("TM_SPARK_SHUFFLE_PARTITIONS", "8"),
+    "adaptive_enabled": os.getenv("TM_SPARK_ADAPTIVE_ENABLED", "true").lower() == "true",
+    "ui_enabled": os.getenv("TM_SPARK_UI_ENABLED", "false").lower() == "true",
+}
 
 
 def log_to_registry(course_id: str, ingest_date: str, status: str, 
@@ -52,41 +77,57 @@ def run_spark_etl(**context):
             f"Missing required params. Got: course_id={course_id}, ingest_date={ingest_date}, bronze_prefix={bronze_prefix}"
         )
 
+    # Log configuration being used
+    env = os.getenv("TM_ENV", "unknown")
     print(f"\n{'='*60}")
     print("⚙️  SILVER ETL: Spark Transform")
     print(f"{'='*60}")
-    print(f"  Course: {course_id}")
-    print(f"  Date:   {ingest_date}")
-    print(f"  Source: s3://tm-lakehouse-landing-zone/{bronze_prefix}")
+    print(f"  Course:      {course_id}")
+    print(f"  Date:        {ingest_date}")
+    print(f"  Source:      s3://tm-lakehouse-landing-zone/{bronze_prefix}")
+    print(f"  Environment: {env}")
+    print(f"  Spark Config:")
+    print(f"    Master:     {SPARK_CONFIG['master']}")
+    print(f"    Driver Mem: {SPARK_CONFIG['driver_memory']}")
+    print(f"    Exec Mem:   {SPARK_CONFIG['executor_memory']}")
+    print(f"    Partitions: {SPARK_CONFIG['shuffle_partitions']}")
     print("")
 
     # Build the spark-submit command
+    # Use local pre-baked JARs (no Maven downloads needed - much faster and more reliable!)
+    jars_path = "/opt/spark/extra-jars"
+    jars = ",".join([
+        f"{jars_path}/hadoop-aws-3.3.4.jar",
+        f"{jars_path}/aws-java-sdk-bundle-1.12.262.jar",
+        f"{jars_path}/iceberg-spark-runtime-3.5_2.12-1.4.3.jar",
+        f"{jars_path}/bundle-2.20.18.jar",
+        f"{jars_path}/wildfly-openssl-1.0.7.Final.jar",
+        f"{jars_path}/eventstream-1.0.1.jar",
+    ])
+    
+    # Build command with config-driven settings
     cmd = [
         "docker",
         "exec",
-        "-e",
-        "AWS_REGION=us-east-1",
-        "-e",
-        "TM_BUCKET_LANDING=tm-lakehouse-landing-zone",
-        "-e",
-        "TM_BUCKET_SOURCE=tm-lakehouse-source-store",
-        "-e",
-        "TM_ICEBERG_WAREHOUSE_SILVER=s3a://tm-lakehouse-source-store/warehouse",
+        "-e", "AWS_REGION=us-east-1",
+        "-e", "TM_BUCKET_LANDING=tm-lakehouse-landing-zone",
+        "-e", "TM_BUCKET_SOURCE=tm-lakehouse-source-store",
+        "-e", "TM_ICEBERG_WAREHOUSE_SILVER=s3a://tm-lakehouse-source-store/warehouse",
         "spark",
         "/opt/spark/bin/spark-submit",
-        "--master",
-        "local[*]",
-        "--conf",
-        "spark.driver.extraJavaOptions=-Divy.cache.dir=/tmp/ivy-cache -Divy.home=/tmp/ivy-home",
-        "--packages",
-        "org.apache.hadoop:hadoop-aws:3.3.4,org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.4.3,software.amazon.awssdk:bundle:2.20.18",
+        "--master", SPARK_CONFIG["master"],
+        "--driver-memory", SPARK_CONFIG["driver_memory"],
+        "--conf", f"spark.executor.memory={SPARK_CONFIG['executor_memory']}",
+        "--conf", f"spark.sql.adaptive.enabled={str(SPARK_CONFIG['adaptive_enabled']).lower()}",
+        "--conf", "spark.sql.adaptive.coalescePartitions.enabled=true",
+        "--conf", f"spark.sql.shuffle.partitions={SPARK_CONFIG['shuffle_partitions']}",
+        "--conf", "spark.driver.maxResultSize=512m",
+        "--conf", f"spark.ui.enabled={str(SPARK_CONFIG['ui_enabled']).lower()}",
+        "--jars", jars,
         "/opt/tagmarshal/jobs/spark/silver_etl.py",
-        "--course-id",
-        course_id,
-        "--ingest-date",
-        ingest_date,
-        "--bronze-prefix",
-        bronze_prefix,
+        "--course-id", course_id,
+        "--ingest-date", ingest_date,
+        "--bronze-prefix", bronze_prefix,
     ]
 
     print("  Running Spark job...")

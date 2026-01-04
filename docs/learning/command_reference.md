@@ -135,9 +135,30 @@ just trino-status                                             # Check health
 
 | Command | Description |
 |---------|-------------|
+| `just ls` | List all buckets |
+| `just ls <bucket>` | List files in a bucket |
+| `just ls <bucket>/<prefix>` | List files with prefix |
+| `just view <path>` | View file contents (CSV/JSON/text) |
+| `just view-all <path>` | View entire file (no line limit) |
+| `just gold-obs` | View latest Gold observability summary |
 | `just tree` | Show all bucket contents |
 | `just tree landing` | Show specific bucket (`landing`, `source`, `serve`) |
 | `just bucket-sizes` | Show size of each bucket |
+
+**Examples:**
+```bash
+# List files
+just ls                                                    # Show all buckets
+just ls tm-lakehouse-landing-zone                          # List Bronze files
+just ls tm-lakehouse-observability/gold                    # List Gold observability
+
+# View files
+just view tm-lakehouse-landing-zone/course_id=americanfalls/ingest_date=2026-01-04/americanfalls.rounds.csv
+just view tm-lakehouse-observability/gold/run_id=20260104T135009Z/summary.json
+
+# View Gold run summary
+just gold-obs                                              # Latest Gold run summary
+```
 
 **Buckets:**
 - `tm-lakehouse-landing-zone` - Bronze (raw files)
@@ -241,6 +262,13 @@ The Streamlit dashboard provides a visual interface for data quality analysis.
 │  just trino                 # Query results                     │
 │  just dashboard             # Data quality dashboard            │
 │  just down                  # Stop when done                    │
+├─────────────────────────────────────────────────────────────────┤
+│                     VIEW FILES (MinIO)                          │
+├─────────────────────────────────────────────────────────────────┤
+│  just ls                    # List all buckets                  │
+│  just ls <bucket>           # List files in bucket              │
+│  just view <path>           # View file (CSV/JSON/text)         │
+│  just gold-obs              # Latest Gold run summary           │
 ├─────────────────────────────────────────────────────────────────┤
 │                     TROUBLESHOOTING                             │
 ├─────────────────────────────────────────────────────────────────┤

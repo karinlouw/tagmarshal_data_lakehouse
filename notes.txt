@@ -41,3 +41,15 @@ ORDER BY 1;
 - Check json nested against csv to make sure we got it right
 
 - What is defined as corrupt data? Or invalid data that goes into quarintine?
+
+
+
+4 January!
+The reason your terminal output looks successful is because just silver-all only triggers the
+Airflow DAG and immediately returns - it doesn't wait for the actual Spark job to complete.
+
+- Create .env.example files
+
+- Understand the DAGs
+
+- Lineage
