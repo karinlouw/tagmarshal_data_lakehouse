@@ -371,10 +371,16 @@ def main():
                 ),
             ),
         )
+        # Add flag to track missing timestamps (for data quality analysis)
+        # Keep all rows including NULL timestamps for exploration/audit phase
+        .withColumn("is_timestamp_missing", F.col("fix_timestamp").isNull())
     )
 
-    # Drop rows with no timestamp
-    out = out.filter(F.col("fix_timestamp").isNotNull())
+    # NOTE: Previously we dropped rows with NULL fix_timestamp here.
+    # For exploration/audit phase, we keep all rows and use is_timestamp_missing flag instead.
+    # This allows analysis of null patterns and data quality issues.
+    # To filter out NULL timestamps in queries, use: WHERE is_timestamp_missing = false
+    # out = out.filter(F.col("fix_timestamp").isNotNull())  # COMMENTED OUT - keeping nulls for audit
 
     # Dedup: prefer is_cache=true for same (round_id, fix_timestamp)
     w = Window.partitionBy("round_id", "fix_timestamp").orderBy(

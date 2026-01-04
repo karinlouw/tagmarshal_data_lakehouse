@@ -8,7 +8,8 @@ Main fact table for telemetry events (one row per GPS fix).
 |--------|------|----------|-------------|
 | `round_id` | STRING | NO | Unique round identifier |
 | `course_id` | STRING | NO | Course identifier |
-| `fix_timestamp` | TIMESTAMP | NO | GPS fix timestamp |
+| `fix_timestamp` | TIMESTAMP | YES | GPS fix timestamp (NULL if missing from source) |
+| `is_timestamp_missing` | BOOLEAN | NO | Flag indicating if fix_timestamp is NULL (for data quality analysis) |
 | `location_index` | INTEGER | NO | Position in round's location array |
 | `pace` | DOUBLE | YES | Pace value (seconds behind goal) |
 | `pace_gap` | DOUBLE | YES | Pace gap between consecutive fixes |
@@ -23,7 +24,7 @@ Main fact table for telemetry events (one row per GPS fix).
 | `goal_time` | INTEGER | YES | Goal time in seconds |
 | `is_cache` | BOOLEAN | YES | Whether this is cached data |
 | `ingest_date` | DATE | NO | Date when data was ingested |
-| `event_date` | DATE | NO | Date of the event (derived from fix_timestamp) |
+| `event_date` | DATE | YES | Date of the event (derived from fix_timestamp, NULL if timestamp missing) |
 
 ## Partitioning
 
@@ -32,8 +33,11 @@ Main fact table for telemetry events (one row per GPS fix).
 
 ## Data Quality
 
-- **Deduplication**: One row per `(round_id, fix_timestamp)` combination
-- **Null Handling**: Empty location slots are filtered out (hole_number and section_number both NULL)
+- **Deduplication**: One row per `(round_id, fix_timestamp)` combination (where timestamp exists)
+- **Null Handling**: 
+  - Empty location slots are filtered out (hole_number and section_number both NULL)
+  - Rows with NULL `fix_timestamp` are **kept** for data quality analysis (use `is_timestamp_missing` flag to filter)
+  - Invalid coordinates (out of range) are quarantined to `tm-lakehouse-quarantine`
 
 ## Source
 

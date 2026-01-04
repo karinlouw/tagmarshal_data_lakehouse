@@ -1,9 +1,13 @@
 -- Null Value Analysis
 -- Detailed breakdown of missing data across all critical columns
+-- Updated to include timestamp null analysis using is_timestamp_missing flag
 
 SELECT 
     course_id,
     COUNT(*) as total_rows,
+    -- Timestamp (critical - now tracked with flag)
+    SUM(CASE WHEN is_timestamp_missing = true THEN 1 ELSE 0 END) as null_timestamp,
+    ROUND(100.0 * SUM(CASE WHEN is_timestamp_missing = true THEN 1 ELSE 0 END) / COUNT(*), 2) as pct_null_timestamp,
     -- Pace columns
     SUM(CASE WHEN pace IS NULL THEN 1 ELSE 0 END) as null_pace,
     ROUND(100.0 * SUM(CASE WHEN pace IS NULL THEN 1 ELSE 0 END) / COUNT(*), 2) as pct_null_pace,
@@ -28,5 +32,5 @@ SELECT
     ROUND(100.0 * SUM(CASE WHEN goal_time IS NULL THEN 1 ELSE 0 END) / COUNT(*), 2) as pct_null_goal_time
 FROM iceberg.silver.fact_telemetry_event
 GROUP BY course_id
-ORDER BY course_id
+ORDER BY pct_null_timestamp DESC, course_id
 

@@ -150,6 +150,7 @@ SQL_PACE_GAP_BY_COURSE = load_query("pace_gap_coverage.sql")
 SQL_DATASET_VARIANCE = load_query("dataset_variance.sql")
 SQL_NULL_ANALYSIS = load_query("null_analysis.sql")
 SQL_COLUMN_COMPLETENESS = load_query("column_completeness.sql")
+SQL_BOTTLENECK_ANALYSIS = load_query("bottleneck_analysis.sql")
 
 
 # =============================================================================
@@ -171,6 +172,7 @@ def render_sidebar():
                 "🏠 Executive Summary",
                 "📊 Data Quality",
                 "🏌️ Course Analysis",
+                "🗺️ Course Map",
                 "⚠️ Critical Gaps",
             ],
             label_visibility="collapsed",
@@ -279,6 +281,273 @@ def render_executive_summary():
 def render_data_quality():
     """Render the detailed data quality page."""
     st.title("📊 Data quality analysis")
+
+    st.info(
+        """
+    **🔍 Data Audit Phase**: This page shows data completeness and null patterns.
+    We've preserved null values in the Silver layer to understand data quality before transformation.
+    """
+    )
+
+    # Data Completeness Overview (NEW)
+    st.markdown("### 📋 Data completeness overview")
+
+    completeness_query = """
+    SELECT 
+        course_id,
+        COUNT(*) as total_records,
+        COUNT(DISTINCT round_id) as unique_rounds,
+        ROUND(100.0 * SUM(CASE WHEN fix_timestamp IS NOT NULL AND is_timestamp_missing = false THEN 1 ELSE 0 END) / COUNT(*), 1) as timestamp_pct,
+        ROUND(100.0 * SUM(CASE WHEN pace IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as pace_pct,
+        ROUND(100.0 * SUM(CASE WHEN pace_gap IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as pace_gap_pct,
+        ROUND(100.0 * SUM(CASE WHEN positional_gap IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as pos_gap_pct,
+        ROUND(100.0 * SUM(CASE WHEN hole_number IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as hole_pct,
+        ROUND(100.0 * SUM(CASE WHEN latitude IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as gps_pct,
+        ROUND(100.0 * SUM(CASE WHEN battery_percentage IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as battery_pct,
+        ROUND(100.0 * SUM(CASE WHEN start_hole IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as start_hole_pct,
+        ROUND(
+            (
+                100.0 * SUM(CASE WHEN fix_timestamp IS NOT NULL AND is_timestamp_missing = false THEN 1 ELSE 0 END) / COUNT(*) +
+                100.0 * SUM(CASE WHEN pace IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*) +
+                100.0 * SUM(CASE WHEN hole_number IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*) +
+                100.0 * SUM(CASE WHEN latitude IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*)
+            ) / 4, 1
+        ) as completeness_score
+    FROM iceberg.silver.fact_telemetry_event
+    GROUP BY course_id
+    ORDER BY completeness_score DESC
+    """
+
+    completeness_df = run_query(completeness_query)
+
+    if not completeness_df.empty:
+        # Summary metrics
+        col1, col2, col3, col4 = st.columns(4)
+
+        total_records = completeness_df["total_records"].sum()
+        total_rounds = completeness_df["unique_rounds"].sum()
+        avg_completeness = completeness_df["completeness_score"].mean()
+
+        with col1:
+            st.metric("Total records", f"{total_records:,}")
+        with col2:
+            st.metric("Total rounds", f"{total_rounds:,}")
+        with col3:
+            st.metric("Avg completeness", f"{avg_completeness:.1f}%")
+        with col4:
+            # Count courses with >80% completeness
+            good_courses = len(
+                completeness_df[completeness_df["completeness_score"] >= 80]
+            )
+            st.metric("Courses ≥80% complete", f"{good_courses}/{len(completeness_df)}")
+
+        # Completeness score bar chart
+        fig = px.bar(
+            completeness_df,
+            x="course_id",
+            y="completeness_score",
+            color="completeness_score",
+            color_continuous_scale=["#ff5252", "#ffc107", "#00c853"],
+            title="Overall data completeness score by course",
+            labels={"completeness_score": "Completeness (%)", "course_id": "Course"},
+        )
+        fig.add_hline(
+            y=80, line_dash="dash", line_color="green", annotation_text="Target: 80%"
+        )
+        fig.update_layout(
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Traffic light status per course
+        st.markdown("#### Status by course")
+
+        for _, row in completeness_df.iterrows():
+            score = row["completeness_score"]
+            records = row["total_records"]
+            rounds = row["unique_rounds"]
+
+            if score >= 90:
+                status = "🟢"
+                label = "Excellent"
+            elif score >= 80:
+                status = "🟡"
+                label = "Good"
+            elif score >= 60:
+                status = "🟠"
+                label = "Fair"
+            else:
+                status = "🔴"
+                label = "Poor"
+
+            with st.expander(
+                f"{status} **{row['course_id']}** - {score:.1f}% ({label})"
+            ):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown(f"**Records:** {records:,}")
+                    st.markdown(f"**Rounds:** {rounds:,}")
+                with col2:
+                    st.markdown(f"**Timestamp:** {row['timestamp_pct']:.1f}%")
+                    st.markdown(f"**Pace:** {row['pace_pct']:.1f}%")
+                    st.markdown(f"**Pace gap:** {row['pace_gap_pct']:.1f}%")
+                    st.markdown(f"**Hole #:** {row['hole_pct']:.1f}%")
+                    st.markdown(f"**GPS:** {row['gps_pct']:.1f}%")
+                    st.markdown(f"**Battery:** {row['battery_pct']:.1f}%")
+                    st.markdown(f"**Start hole:** {row['start_hole_pct']:.1f}%")
+
+        # Detailed completeness table
+        st.markdown("#### Detailed completeness table")
+        display_df = completeness_df.copy()
+        display_df.columns = [
+            "Course",
+            "Records",
+            "Rounds",
+            "Timestamp %",
+            "Pace %",
+            "Pace gap %",
+            "Pos gap %",
+            "Hole %",
+            "GPS %",
+            "Battery %",
+            "Start hole %",
+            "Score",
+        ]
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+        show_sql(completeness_query, "Data completeness query")
+
+    st.divider()
+
+    # Null records analysis - show actual null counts
+    st.markdown("### 🚫 Null value breakdown")
+    st.markdown("Raw counts of null values per column (preserved for audit).")
+
+    null_counts_query = """
+    SELECT 
+        course_id,
+        COUNT(*) as total_records,
+        SUM(CASE WHEN is_timestamp_missing = true THEN 1 ELSE 0 END) as null_timestamp,
+        SUM(CASE WHEN pace IS NULL THEN 1 ELSE 0 END) as null_pace,
+        SUM(CASE WHEN pace_gap IS NULL THEN 1 ELSE 0 END) as null_pace_gap,
+        SUM(CASE WHEN positional_gap IS NULL THEN 1 ELSE 0 END) as null_pos_gap,
+        SUM(CASE WHEN hole_number IS NULL THEN 1 ELSE 0 END) as null_hole,
+        SUM(CASE WHEN section_number IS NULL THEN 1 ELSE 0 END) as null_section,
+        SUM(CASE WHEN latitude IS NULL OR longitude IS NULL THEN 1 ELSE 0 END) as null_gps,
+        SUM(CASE WHEN battery_percentage IS NULL THEN 1 ELSE 0 END) as null_battery,
+        SUM(CASE WHEN start_hole IS NULL THEN 1 ELSE 0 END) as null_start_hole,
+        SUM(CASE WHEN goal_time IS NULL THEN 1 ELSE 0 END) as null_goal_time
+    FROM iceberg.silver.fact_telemetry_event
+    GROUP BY course_id
+    ORDER BY course_id
+    """
+
+    null_counts_df = run_query(null_counts_query)
+
+    if not null_counts_df.empty:
+        # Total null counts across all courses
+        total_nulls = {
+            "Timestamp": null_counts_df["null_timestamp"].sum(),
+            "Pace": null_counts_df["null_pace"].sum(),
+            "Pace gap": null_counts_df["null_pace_gap"].sum(),
+            "Pos gap": null_counts_df["null_pos_gap"].sum(),
+            "Hole #": null_counts_df["null_hole"].sum(),
+            "Section": null_counts_df["null_section"].sum(),
+            "GPS": null_counts_df["null_gps"].sum(),
+            "Battery": null_counts_df["null_battery"].sum(),
+            "Start hole": null_counts_df["null_start_hole"].sum(),
+        }
+
+        # Bar chart of total nulls
+        null_chart_df = pd.DataFrame(
+            {
+                "Column": list(total_nulls.keys()),
+                "Null count": list(total_nulls.values()),
+            }
+        )
+
+        fig = px.bar(
+            null_chart_df,
+            x="Column",
+            y="Null count",
+            color="Null count",
+            color_continuous_scale=["#00c853", "#ffc107", "#ff5252"],
+            title="Total null values by column (all courses)",
+        )
+        fig.update_layout(
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Key insights
+        st.markdown("#### 🎯 Key findings")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**Columns with most nulls:**")
+            sorted_nulls = sorted(total_nulls.items(), key=lambda x: x[1], reverse=True)
+            for col_name, count in sorted_nulls[:5]:
+                if count > 0:
+                    total = null_counts_df["total_records"].sum()
+                    pct = 100.0 * count / total
+                    status = "🔴" if pct > 20 else "🟠" if pct > 5 else "🟢"
+                    st.markdown(f"- {status} **{col_name}**: {count:,} ({pct:.1f}%)")
+
+        with col2:
+            st.markdown("**Impact assessment:**")
+            # Pace gap is critical for bottleneck analysis
+            pace_gap_nulls = total_nulls["Pace gap"]
+            total = null_counts_df["total_records"].sum()
+            pace_gap_pct = 100.0 * pace_gap_nulls / total
+
+            if pace_gap_pct > 50:
+                st.error(
+                    f"⚠️ {pace_gap_pct:.0f}% of records missing pace_gap - bottleneck analysis limited"
+                )
+            elif pace_gap_pct > 20:
+                st.warning(
+                    f"⚠️ {pace_gap_pct:.0f}% missing pace_gap - some bottleneck analysis possible"
+                )
+            else:
+                st.success(
+                    f"✅ Only {pace_gap_pct:.0f}% missing pace_gap - good for bottleneck analysis"
+                )
+
+            # GPS completeness
+            gps_nulls = total_nulls["GPS"]
+            gps_pct = 100.0 * gps_nulls / total
+            if gps_pct > 5:
+                st.warning(f"⚠️ {gps_pct:.1f}% missing GPS - affects mapping")
+            else:
+                st.success(f"✅ Only {gps_pct:.1f}% missing GPS - good for mapping")
+
+        # Raw null counts table
+        st.markdown("#### Raw null counts by course")
+        display_df = null_counts_df.copy()
+        display_df.columns = [
+            "Course",
+            "Total",
+            "Timestamp",
+            "Pace",
+            "Pace gap",
+            "Pos gap",
+            "Hole",
+            "Section",
+            "GPS",
+            "Battery",
+            "Start hole",
+            "Goal time",
+        ]
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+        show_sql(null_counts_query, "Null counts query")
+
+    st.divider()
 
     # Column completeness
     st.markdown("### Column completeness by course")
@@ -752,6 +1021,284 @@ def render_critical_gaps():
                 st.markdown(f"- **{row['course_id']}**: {row['top_recommendation']}")
 
 
+def render_course_map():
+    """
+    Render the course map page showing bottleneck locations.
+
+    Uses pace_gap (time to group ahead) instead of pace (time vs goal).
+    Why? pace_gap shows actual group spacing - a spike indicates a bottleneck.
+    pace is relative to arbitrary goal times set by courses.
+
+    Key columns:
+    - pace_gap: Time gap to group ahead (seconds). High variance = bottleneck
+    - positional_gap: Position relative to group ahead. Positive = falling behind
+    - latitude, longitude: GPS coordinates for mapping
+    """
+    st.title("🗺️ Course Bottleneck Map")
+
+    st.markdown(
+        """
+    This map shows where groups bunch up on each course using **pace gap** analysis.
+    
+    **Why pace gap?** It measures actual spacing between groups, not arbitrary goal times.
+    - **Red markers** = High variance in spacing (groups bunching up = bottleneck)
+    - **Green markers** = Consistent spacing (smooth flow)
+    """
+    )
+
+    # Get bottleneck data
+    bottleneck_df = run_query(SQL_BOTTLENECK_ANALYSIS)
+
+    if bottleneck_df.empty:
+        st.warning("No pace gap data available. This course may not have gap metrics.")
+        return
+
+    # Course selector - only show courses with pace_gap data
+    courses = sorted(bottleneck_df["course_id"].unique())
+
+    if not courses:
+        st.warning("No courses have pace gap data for bottleneck analysis.")
+        return
+
+    selected_course = st.selectbox("Select course", courses)
+
+    # Filter to selected course
+    course_df = bottleneck_df[bottleneck_df["course_id"] == selected_course].copy()
+
+    if course_df.empty:
+        st.warning(f"No pace gap data for {selected_course}")
+        return
+
+    st.divider()
+
+    # Metric selector
+    st.markdown("### Select bottleneck metric")
+
+    metric_options = {
+        "Pace gap variance (std dev)": {
+            "column": "pace_gap_stddev",
+            "label": "Pace gap std dev",
+            "description": "Variance in spacing between groups. **High = inconsistent spacing = bottleneck**",
+            "color_scale": ["#00c853", "#ffc107", "#ff5252"],  # Green to red
+            "sort_ascending": False,  # High is bad
+        },
+        "Average pace gap": {
+            "column": "avg_pace_gap_seconds",
+            "label": "Avg pace gap (sec)",
+            "description": "Average seconds between you and group ahead. **High = spread out, Low = tight spacing**",
+            "color_scale": ["#00c853", "#ffc107", "#ff5252"],  # Green to red
+            "sort_ascending": False,  # High spacing is generally better
+        },
+        "Positional gap": {
+            "column": "avg_positional_gap",
+            "label": "Avg positional gap",
+            "description": "Are groups catching up or falling behind? **Positive = falling behind = problem**",
+            "color_scale": ["#00c853", "#ffc107", "#ff5252"],  # Green to red
+            "sort_ascending": False,  # Positive is bad
+        },
+        "Traditional pace": {
+            "column": "avg_pace_seconds",
+            "label": "Avg pace (sec)",
+            "description": "Seconds behind/ahead of goal time. **Positive = behind schedule** (less reliable - goal times are arbitrary)",
+            "color_scale": ["#00c853", "#ffc107", "#ff5252"],  # Green to red
+            "sort_ascending": False,  # High is bad
+        },
+    }
+
+    selected_metric = st.radio(
+        "Choose metric to analyse",
+        options=list(metric_options.keys()),
+        horizontal=True,
+        help="Different metrics reveal different aspects of bottleneck formation",
+    )
+
+    metric_config = metric_options[selected_metric]
+    metric_column = metric_config["column"]
+
+    # Show description
+    st.info(f"**{selected_metric}**: {metric_config['description']}")
+
+    st.divider()
+
+    # Explain all metrics
+    with st.expander("📖 Understanding all metrics"):
+        st.markdown(
+            """
+        | Metric | What it means | What it reveals |
+        |--------|---------------|-----------------|
+        | **Pace gap variance** | Standard deviation of spacing between groups | **Best for bottlenecks** - High variance = groups bunching up |
+        | **Average pace gap** | Mean seconds between you and group ahead | Shows if course is generally spread out or tight |
+        | **Positional gap** | Are you catching up or falling behind? | Identifies sections where groups consistently fall behind |
+        | **Traditional pace** | Seconds behind/ahead of goal time | Less reliable - goal times are course-set and often unrealistic |
+        
+        **Recommendation:** Start with **Pace gap variance** - it's the best indicator of actual bottlenecks.
+        """
+        )
+
+    # Create map - colour by selected metric
+    st.markdown(f"### Section locations by {selected_metric.lower()}")
+
+    # Prepare hover data with all metrics
+    hover_data = {
+        "section_number": True,
+        "hole_section": True,
+        "rounds_measured": ":,",
+    }
+    # Add all metric columns to hover
+    for metric_name, config in metric_options.items():
+        hover_data[config["column"]] = ":.0f"
+
+    fig = px.scatter_mapbox(
+        course_df,
+        lat="lat",
+        lon="lon",
+        color=metric_column,
+        size="rounds_measured",
+        hover_name="hole_number",
+        hover_data=hover_data,
+        color_continuous_scale=metric_config["color_scale"],
+        labels={
+            metric_column: metric_config["label"],
+            "rounds_measured": "Rounds",
+            "section_number": "Section",
+            "hole_section": "Hole section",
+        },
+        title=f"Bottleneck analysis: {selected_course} ({selected_metric})",
+        zoom=15,
+    )
+
+    fig.update_layout(
+        mapbox_style="open-street-map",
+        margin={"r": 0, "t": 40, "l": 0, "b": 0},
+        height=500,
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+
+    # Bottleneck summary - sort by selected metric
+    st.markdown("### Bottleneck summary")
+
+    # Aggregate by hole for summary
+    agg_dict = {
+        metric_column: "mean",
+        "rounds_measured": "sum",
+    }
+    # Add positional gap if not already selected
+    if metric_column != "avg_positional_gap":
+        agg_dict["avg_positional_gap"] = "mean"
+
+    hole_summary = (
+        course_df.groupby("hole_number")
+        .agg(agg_dict)
+        .reset_index()
+        .sort_values(metric_column, ascending=metric_config["sort_ascending"])
+    )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        # Worst holes (highest values for most metrics, but depends on metric)
+        if metric_config["sort_ascending"]:
+            label = "🟢 Best (lowest values)"
+            worst = hole_summary.head(3)
+        else:
+            label = "🔴 Worst (highest values)"
+            worst = hole_summary.head(3)
+
+        st.markdown(f"**{label}**")
+        for _, row in worst.iterrows():
+            value = row[metric_column]
+            hole = int(row["hole_number"])
+
+            # Format based on metric type
+            if "stddev" in metric_column:
+                st.markdown(f"- **Hole {hole}**: σ={value:.0f}s")
+            elif "gap" in metric_column or "pace" in metric_column:
+                mins = abs(value) / 60
+                sign = "+" if value > 0 else ""
+                st.markdown(f"- **Hole {hole}**: {sign}{value:.0f}s ({mins:.1f} min)")
+            else:
+                st.markdown(f"- **Hole {hole}**: {value:.0f}")
+
+    with col2:
+        # Best holes (opposite of worst)
+        if metric_config["sort_ascending"]:
+            label = "🔴 Worst (highest values)"
+            best = hole_summary.tail(3).iloc[::-1]
+        else:
+            label = "🟢 Best (lowest values)"
+            best = hole_summary.tail(3).iloc[::-1]
+
+        st.markdown(f"**{label}**")
+        for _, row in best.iterrows():
+            value = row[metric_column]
+            hole = int(row["hole_number"])
+
+            # Format based on metric type
+            if "stddev" in metric_column:
+                st.markdown(f"- **Hole {hole}**: σ={value:.0f}s")
+            elif "gap" in metric_column or "pace" in metric_column:
+                mins = abs(value) / 60
+                sign = "+" if value > 0 else ""
+                st.markdown(f"- **Hole {hole}**: {sign}{value:.0f}s ({mins:.1f} min)")
+            else:
+                st.markdown(f"- **Hole {hole}**: {value:.0f}")
+
+    st.divider()
+
+    # Data table with all metrics
+    st.markdown("### Detailed data by section")
+    st.caption(f"💡 Currently viewing: **{metric_config['label']}** (marked with ⭐)")
+
+    # Build column mapping
+    column_mapping = {
+        "hole_number": "Hole",
+        "section_number": "Section",
+        "hole_section": "Hole sec",
+        "pace_gap_stddev": "Gap std dev",
+        "avg_pace_gap_seconds": "Avg gap (sec)",
+        "avg_positional_gap": "Pos gap",
+        "avg_pace_seconds": "Traditional pace",
+        "rounds_measured": "Rounds",
+    }
+
+    # Mark selected metric with star
+    column_mapping[metric_column] = metric_config["label"] + " ⭐"
+
+    # Select and rename columns
+    display_df = (
+        course_df[
+            [
+                "hole_number",
+                "section_number",
+                "hole_section",
+                "pace_gap_stddev",
+                "avg_pace_gap_seconds",
+                "avg_positional_gap",
+                "avg_pace_seconds",
+                "rounds_measured",
+            ]
+        ]
+        .sort_values("section_number")
+        .copy()
+    )
+
+    # Reorder to put selected metric after location columns
+    base_cols = ["hole_number", "section_number", "hole_section"]
+    metric_cols = [metric_column]
+    other_cols = [c for c in display_df.columns if c not in base_cols + metric_cols]
+    column_order = base_cols + metric_cols + other_cols
+
+    display_df = display_df[column_order]
+    display_df = display_df.rename(columns=column_mapping)
+
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+    show_sql(SQL_BOTTLENECK_ANALYSIS, "Bottleneck analysis query")
+
+
 # =============================================================================
 # Main App
 # =============================================================================
@@ -802,6 +1349,8 @@ def main():
         render_data_quality()
     elif page == "🏌️ Course Analysis":
         render_course_analysis()
+    elif page == "🗺️ Course Map":
+        render_course_map()
     elif page == "⚠️ Critical Gaps":
         render_critical_gaps()
 
