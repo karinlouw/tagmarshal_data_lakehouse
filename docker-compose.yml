@@ -107,7 +107,7 @@ services:
     ports:
       - "8081:8080"
     volumes:
-      - ./docker/trino/etc:/etc/trino:ro
+      - ./infrastructure/services/trino/etc:/etc/trino:ro
 
   postgres:
     image: postgres:16
@@ -121,7 +121,7 @@ services:
     volumes:
       - airflow_pg:/var/lib/postgresql/data
       # Auto-run migrations on first startup
-      - ./db/migrations:/docker-entrypoint-initdb.d:ro
+      - ./infrastructure/database:/docker-entrypoint-initdb.d:ro
 
   airflow:
     image: apache/airflow:2.10.3-python3.11

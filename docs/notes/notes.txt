@@ -1,0 +1,44 @@
+1. At bronze ingest, add ingestion summary at the end.
+2. Ingestion watermark
+3. In terminal, add time it took to ingest in minutes + seconds, file size (if low operational cost to get)
+    and the shape of the csv file. Also add path where it is written to.
+4. Validate ingestion (row count, filesize)
+5. Append to tables with the same filenames.
+6. view data ib a database
+
+
+
+3 January:
+- Check decimal values in pace columns
+
+
+- This hour of day query shows play basically the hole day! We have to double check datetime standardisation:
+SELECT 
+    hour(fix_timestamp) as hour_of_day, 
+    count(*) as fixes,
+    count(DISTINCT round_id) as rounds
+FROM fact_telemetry_event
+WHERE fix_timestamp IS NOT NULL
+GROUP BY 1
+ORDER BY 1;
+
+- We need to validate that we ingested the data correctly...somehow
+
+- Determine where the bottlenecks happen in a course
+- Map geospatial data
+- Measure processing power and storage needed for AWS clusters
+- How to track course changes over time
+
+- Check the filtering of the empty locations on the silver ETL. around line 288 in the silver_etl file:
+    # Filter out empty location slots (rows where key fields are NULL)
+    # This removes "padding" rows from CSVs with more slots than actual data
+    long_df = long_df.filter(
+        F.col("location.hole_number").isNotNull() | 
+        F.col("location.section_number").isNotNull()
+)
+
+
+- Check json nested against csv to make sure we got it right
+
+- What is defined as corrupt data? Or invalid data that goes into quarintine?
+

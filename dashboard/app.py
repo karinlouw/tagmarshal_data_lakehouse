@@ -10,6 +10,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import plotly.io as pio
+from pathlib import Path
 from trino.dbapi import connect
 from trino.auth import BasicAuthentication
 
@@ -87,7 +88,7 @@ def get_trino_connection():
     """Create a connection to Trino."""
     return connect(
         host="localhost",
-        port=8080,
+        port=8081,
         user="trino",
         catalog="iceberg",
         schema="silver",
@@ -128,96 +129,27 @@ def show_sql(sql: str, title: str = "SQL Query"):
 
 
 # =============================================================================
-# SQL Queries
+# SQL Queries - Load from files
 # =============================================================================
 
-SQL_EXECUTIVE_SUMMARY = """
-SELECT 
-    COUNT(DISTINCT course_id) as total_courses,
-    COUNT(DISTINCT round_id) as total_rounds,
-    COUNT(*) as total_events
-FROM iceberg.silver.fact_telemetry_event
-"""
 
-SQL_DATA_QUALITY_OVERVIEW = """
-SELECT 
-    course_id,
-    total_events,
-    total_rounds,
-    ROUND(data_quality_score, 1) as data_quality_score,
-    ROUND(pct_missing_pace, 1) as pct_missing_pace,
-    ROUND(pct_missing_hole, 1) as pct_missing_hole,
-    ROUND(pct_low_battery, 1) as pct_low_battery
-FROM iceberg.gold.data_quality_overview
-ORDER BY data_quality_score DESC
-"""
+def load_query(filename: str) -> str:
+    """Load SQL query from queries/exploration directory."""
+    query_path = Path(__file__).parent.parent / "queries" / "exploration" / filename
+    with open(query_path, "r") as f:
+        return f.read().strip()
 
-SQL_CRITICAL_GAPS = """
-SELECT 
-    course_id,
-    total_events,
-    total_rounds,
-    ROUND(usability_score, 1) as usability_score,
-    pace_data_status,
-    location_data_status,
-    device_health_status,
-    round_config_status,
-    top_recommendation
-FROM iceberg.gold.critical_column_gaps
-ORDER BY usability_score DESC
-"""
 
-SQL_COURSE_CONFIG = """
-SELECT 
-    course_id,
-    total_rounds,
-    likely_course_type,
-    max_section_seen,
-    max_holes_in_round,
-    ROUND(pct_nine_hole, 1) as pct_nine_hole,
-    unique_start_holes,
-    ROUND(pct_shotgun_starts, 1) as pct_shotgun_starts,
-    course_complexity_score
-FROM iceberg.gold.course_configuration_analysis
-ORDER BY course_complexity_score DESC
-"""
-
-SQL_BATTERY_BY_COURSE = """
-SELECT 
-    course_id,
-    COUNT(*) as total_events,
-    SUM(CASE WHEN battery_percentage < 20 THEN 1 ELSE 0 END) as low_battery,
-    ROUND(100.0 * SUM(CASE WHEN battery_percentage < 20 THEN 1 ELSE 0 END) / COUNT(*), 1) as pct_low_battery
-FROM iceberg.silver.fact_telemetry_event
-WHERE battery_percentage IS NOT NULL
-GROUP BY course_id
-ORDER BY pct_low_battery DESC
-"""
-
-SQL_PACE_GAP_BY_COURSE = """
-SELECT 
-    course_id,
-    COUNT(*) as total_events,
-    SUM(CASE WHEN pace_gap IS NULL THEN 1 ELSE 0 END) as missing_pace_gap,
-    ROUND(100.0 * SUM(CASE WHEN pace_gap IS NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as pct_missing
-FROM iceberg.silver.fact_telemetry_event
-GROUP BY course_id
-ORDER BY pct_missing DESC
-"""
-
-SQL_COLUMN_COMPLETENESS = """
-SELECT 
-    course_id,
-    COUNT(*) as total,
-    ROUND(100.0 * SUM(CASE WHEN pace IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as pace_pct,
-    ROUND(100.0 * SUM(CASE WHEN pace_gap IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as pace_gap_pct,
-    ROUND(100.0 * SUM(CASE WHEN hole_number IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as hole_pct,
-    ROUND(100.0 * SUM(CASE WHEN battery_percentage IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as battery_pct,
-    ROUND(100.0 * SUM(CASE WHEN latitude IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as gps_pct
-FROM iceberg.silver.fact_telemetry_event
-GROUP BY course_id
-ORDER BY course_id
-"""
+# Load all queries from files
+SQL_EXECUTIVE_SUMMARY = load_query("executive_summary.sql")
+SQL_DATA_QUALITY_OVERVIEW = load_query("data_quality_overview.sql")
+SQL_CRITICAL_GAPS = load_query("critical_gaps.sql")
+SQL_COURSE_CONFIG = load_query("course_configuration.sql")
+SQL_BATTERY_BY_COURSE = load_query("battery_analysis.sql")
+SQL_PACE_GAP_BY_COURSE = load_query("pace_gap_coverage.sql")
+SQL_DATASET_VARIANCE = load_query("dataset_variance.sql")
+SQL_NULL_ANALYSIS = load_query("null_analysis.sql")
+SQL_COLUMN_COMPLETENESS = load_query("column_completeness.sql")
 
 
 # =============================================================================
@@ -262,29 +194,27 @@ def render_sidebar():
 def render_executive_summary():
     """Render the executive summary page."""
     st.title("⛳ TagMarshal Data Quality Report")
-    st.markdown("### Executive Summary")
+    st.markdown("### Executive summary")
 
     # Key metrics
-    show_sql(SQL_EXECUTIVE_SUMMARY, "Executive Summary Query")
-
     summary = run_query(SQL_EXECUTIVE_SUMMARY)
 
     if not summary.empty:
         col1, col2, col3 = st.columns(3)
 
         with col1:
-            st.metric("Total Courses", f"{summary['total_courses'].iloc[0]:,}")
+            st.metric("Total courses", f"{summary['total_courses'].iloc[0]:,}")
         with col2:
-            st.metric("Total Rounds", f"{summary['total_rounds'].iloc[0]:,}")
+            st.metric("Total rounds", f"{summary['total_rounds'].iloc[0]:,}")
         with col3:
-            st.metric("Total Events", f"{summary['total_events'].iloc[0]:,}")
+            st.metric("Total events", f"{summary['total_events'].iloc[0]:,}")
+
+    show_sql(SQL_EXECUTIVE_SUMMARY, "Executive summary query")
 
     st.divider()
 
     # Data quality overview
-    st.markdown("### Data Quality by Course")
-
-    show_sql(SQL_DATA_QUALITY_OVERVIEW, "Data Quality Overview Query")
+    st.markdown("### Data quality by course")
 
     quality_df = run_query(SQL_DATA_QUALITY_OVERVIEW)
 
@@ -296,8 +226,8 @@ def render_executive_summary():
             y="data_quality_score",
             color="data_quality_score",
             color_continuous_scale=["#ff5252", "#ffc107", "#64dd17", "#00c853"],
-            title="Data Quality Score by Course",
-            labels={"data_quality_score": "Quality Score (%)", "course_id": "Course"},
+            title="Data quality score by course",
+            labels={"data_quality_score": "Quality score (%)", "course_id": "Course"},
         )
         fig.update_layout(
             plot_bgcolor="rgba(0,0,0,0)",
@@ -311,24 +241,24 @@ def render_executive_summary():
 
         # Display table
         st.dataframe(
-            quality_df.style.background_gradient(
-                subset=["data_quality_score"], cmap="RdYlGn"
-            ),
+            quality_df,
             use_container_width=True,
             hide_index=True,
         )
 
+    show_sql(SQL_DATA_QUALITY_OVERVIEW, "Data quality overview query")
+
     st.divider()
 
     # Key findings
-    st.markdown("### 🔑 Key Findings")
+    st.markdown("### 🔑 Key findings")
 
     col1, col2 = st.columns(2)
 
     with col1:
         st.success(
             """
-        **✅ Ready for Migration**
+        **✅ Ready for migration**
         - Pinehurst 4: 98.6% quality
         - Erin Hills: 98.2% quality
         - American Falls: 98.0% quality
@@ -338,7 +268,7 @@ def render_executive_summary():
     with col2:
         st.warning(
             """
-        **⚠️ Needs Attention**
+        **⚠️ Needs attention**
         - American Falls: 51.6% low battery events
         - Indian Creek: 100% missing pace_gap
         - Bradshaw Farm: 13.6% missing hole numbers
@@ -348,12 +278,10 @@ def render_executive_summary():
 
 def render_data_quality():
     """Render the detailed data quality page."""
-    st.title("📊 Data Quality Analysis")
+    st.title("📊 Data quality analysis")
 
     # Column completeness
-    st.markdown("### Column Completeness by Course")
-
-    show_sql(SQL_COLUMN_COMPLETENESS, "Column Completeness Query")
+    st.markdown("### Column completeness by course")
 
     completeness_df = run_query(SQL_COLUMN_COMPLETENESS)
 
@@ -362,26 +290,26 @@ def render_data_quality():
         heatmap_data = completeness_df.set_index("course_id")[
             ["pace_pct", "pace_gap_pct", "hole_pct", "battery_pct", "gps_pct"]
         ]
-        heatmap_data.columns = ["Pace", "Pace Gap", "Hole #", "Battery", "GPS"]
+        heatmap_data.columns = ["Pace", "Pace gap", "Hole #", "Battery", "GPS"]
 
         fig = px.imshow(
             heatmap_data,
             color_continuous_scale=["#ff5252", "#ffc107", "#64dd17", "#00c853"],
             aspect="auto",
-            title="Column Completeness Heatmap (%)",
-            labels=dict(x="Column", y="Course", color="% Complete"),
+            title="Column completeness heatmap (%)",
+            labels=dict(x="Column", y="Course", color="% complete"),
         )
         fig.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig, use_container_width=True)
 
         st.dataframe(completeness_df, use_container_width=True, hide_index=True)
 
+    show_sql(SQL_COLUMN_COMPLETENESS, "Column completeness query")
+
     st.divider()
 
     # Battery analysis
-    st.markdown("### 🔋 Battery Health Analysis")
-
-    show_sql(SQL_BATTERY_BY_COURSE, "Battery Analysis Query")
+    st.markdown("### 🔋 Battery health analysis")
 
     battery_df = run_query(SQL_BATTERY_BY_COURSE)
 
@@ -392,8 +320,8 @@ def render_data_quality():
             y="pct_low_battery",
             color="pct_low_battery",
             color_continuous_scale=["#00c853", "#ffc107", "#ff5252"],
-            title="Low Battery Events by Course (%)",
-            labels={"pct_low_battery": "% Low Battery (<20%)", "course_id": "Course"},
+            title="Low battery events by course (%)",
+            labels={"pct_low_battery": "% low battery (<20%)", "course_id": "Course"},
         )
         fig.update_layout(
             plot_bgcolor="rgba(0,0,0,0)",
@@ -410,12 +338,12 @@ def render_data_quality():
 
         st.dataframe(battery_df, use_container_width=True, hide_index=True)
 
+    show_sql(SQL_BATTERY_BY_COURSE, "Battery analysis query")
+
     st.divider()
 
     # Pace gap analysis
-    st.markdown("### ⏱️ Pace Gap Coverage")
-
-    show_sql(SQL_PACE_GAP_BY_COURSE, "Pace Gap Analysis Query")
+    st.markdown("### ⏱️ Pace gap coverage")
 
     pace_df = run_query(SQL_PACE_GAP_BY_COURSE)
 
@@ -426,8 +354,8 @@ def render_data_quality():
             y="pct_missing",
             color="pct_missing",
             color_continuous_scale=["#00c853", "#ffc107", "#ff5252"],
-            title="Missing Pace Gap Values by Course (%)",
-            labels={"pct_missing": "% Missing", "course_id": "Course"},
+            title="Missing pace gap values by course (%)",
+            labels={"pct_missing": "% missing", "course_id": "Course"},
         )
         fig.update_layout(
             plot_bgcolor="rgba(0,0,0,0)",
@@ -438,10 +366,187 @@ def render_data_quality():
 
         st.dataframe(pace_df, use_container_width=True, hide_index=True)
 
+    show_sql(SQL_PACE_GAP_BY_COURSE, "Pace gap analysis query")
+
+    st.divider()
+
+    # Dataset variance analysis
+    st.markdown("### 📊 Dataset variance analysis")
+    st.markdown(
+        "Understanding the differences in data volume and patterns across courses."
+    )
+
+    variance_df = run_query(SQL_DATASET_VARIANCE)
+
+    if not variance_df.empty:
+        # Events per round variance
+        col1, col2 = st.columns(2)
+
+        with col1:
+            fig = px.bar(
+                variance_df,
+                x="course_id",
+                y="total_events",
+                color="total_events",
+                color_continuous_scale="Blues",
+                title="Total events by course",
+                labels={"total_events": "Events", "course_id": "Course"},
+            )
+            fig.update_layout(
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                showlegend=False,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        with col2:
+            fig = px.bar(
+                variance_df,
+                x="course_id",
+                y="avg_events_per_round",
+                color="avg_events_per_round",
+                color_continuous_scale="Greens",
+                title="Average events per round",
+                labels={
+                    "avg_events_per_round": "Avg events/round",
+                    "course_id": "Course",
+                },
+            )
+            fig.update_layout(
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                showlegend=False,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Show variance metrics
+        st.markdown("#### Key variance metrics")
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            min_events = variance_df["avg_events_per_round"].min()
+            max_events = variance_df["avg_events_per_round"].max()
+            st.metric(
+                "Events per round range",
+                f"{min_events:.0f} - {max_events:.0f}",
+                delta=f"{max_events - min_events:.0f} variance",
+            )
+        with col2:
+            max_loc = variance_df["max_location_index"].max()
+            min_loc = variance_df["max_location_index"].min()
+            st.metric(
+                "Max location slots range",
+                f"{min_loc} - {max_loc}",
+                delta=f"{max_loc - min_loc} variance",
+            )
+        with col3:
+            total_days = variance_df["unique_days"].sum()
+            st.metric("Total unique days of data", f"{total_days}")
+
+        st.dataframe(variance_df, use_container_width=True, hide_index=True)
+
+    show_sql(SQL_DATASET_VARIANCE, "Dataset variance query")
+
+    st.divider()
+
+    # Null analysis
+    st.markdown("### 🔍 Null value analysis")
+    st.markdown("Detailed breakdown of missing data across all critical columns.")
+
+    null_df = run_query(SQL_NULL_ANALYSIS)
+
+    if not null_df.empty:
+        # Create a heatmap of null percentages
+        null_pct_cols = [col for col in null_df.columns if col.startswith("pct_null_")]
+
+        if null_pct_cols:
+            # Prepare data for heatmap
+            heatmap_data = null_df[["course_id"] + null_pct_cols].copy()
+            heatmap_data.columns = [
+                (
+                    col.replace("pct_null_", "").replace("_", " ").title()
+                    if col != "course_id"
+                    else col
+                )
+                for col in heatmap_data.columns
+            ]
+
+            # Melt for plotting
+            heatmap_melted = heatmap_data.melt(
+                id_vars=["course_id"], var_name="Column", value_name="% Null"
+            )
+
+            fig = px.density_heatmap(
+                heatmap_melted,
+                x="Column",
+                y="course_id",
+                z="% Null",
+                color_continuous_scale=["#00c853", "#ffc107", "#ff5252"],
+                title="Null percentage by column and course",
+                labels={"course_id": "Course"},
+            )
+            fig.update_layout(
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                xaxis_tickangle=-45,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Summary insights
+        st.markdown("#### 🎯 Key null insights")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**Columns with highest null rates:**")
+            # Find columns with highest average null %
+            avg_nulls = {}
+            for col in null_pct_cols:
+                avg_nulls[col.replace("pct_null_", "")] = null_df[col].mean()
+
+            sorted_nulls = sorted(avg_nulls.items(), key=lambda x: x[1], reverse=True)
+            for col_name, avg_pct in sorted_nulls[:5]:
+                if avg_pct > 0:
+                    status = "🔴" if avg_pct > 20 else "🟠" if avg_pct > 5 else "🟢"
+                    st.markdown(f"- {status} **{col_name}**: {avg_pct:.1f}% average")
+
+        with col2:
+            st.markdown("**Courses with most missing data:**")
+            # Calculate total null % per course
+            null_df["total_null_pct"] = null_df[null_pct_cols].mean(axis=1)
+            worst_courses = null_df.nlargest(3, "total_null_pct")
+            for _, row in worst_courses.iterrows():
+                status = (
+                    "🔴"
+                    if row["total_null_pct"] > 10
+                    else "🟠" if row["total_null_pct"] > 5 else "🟢"
+                )
+                st.markdown(
+                    f"- {status} **{row['course_id']}**: {row['total_null_pct']:.1f}% avg nulls"
+                )
+
+        # Full table (select relevant columns)
+        display_cols = ["course_id", "total_rows"] + [
+            col
+            for col in null_df.columns
+            if "null_" in col and not col.startswith("pct_")
+        ]
+        st.dataframe(
+            (
+                null_df[display_cols]
+                if all(c in null_df.columns for c in display_cols)
+                else null_df
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    show_sql(SQL_NULL_ANALYSIS, "Null analysis query")
+
 
 def render_course_analysis():
     """Render the course configuration analysis page."""
-    st.title("🏌️ Course Configuration Analysis")
+    st.title("🏌️ Course configuration analysis")
 
     st.markdown(
         """
@@ -449,8 +554,6 @@ def render_course_analysis():
     This analysis shows the variety of course configurations in the pilot data.
     """
     )
-
-    show_sql(SQL_COURSE_CONFIG, "Course Configuration Query")
 
     config_df = run_query(SQL_COURSE_CONFIG)
 
@@ -463,7 +566,7 @@ def render_course_analysis():
             fig = px.pie(
                 values=type_counts.values,
                 names=type_counts.index,
-                title="Course Types Distribution",
+                title="Course types distribution",
                 color_discrete_sequence=px.colors.qualitative.Set2,
             )
             fig.update_layout(
@@ -477,9 +580,9 @@ def render_course_analysis():
                 x="course_id",
                 y="course_complexity_score",
                 color="likely_course_type",
-                title="Course Complexity Score",
+                title="Course complexity score",
                 labels={
-                    "course_complexity_score": "Complexity Score",
+                    "course_complexity_score": "Complexity score",
                     "course_id": "Course",
                 },
             )
@@ -491,20 +594,20 @@ def render_course_analysis():
         st.divider()
 
         # Detailed table
-        st.markdown("### Course Configuration Details")
+        st.markdown("### Course configuration details")
         st.dataframe(config_df, use_container_width=True, hide_index=True)
 
         st.divider()
 
         # Key insights
-        st.markdown("### 🔍 Key Insights")
+        st.markdown("### 🔍 Key insights")
 
         col1, col2, col3 = st.columns(3)
 
         with col1:
             st.info(
                 """
-            **27-Hole Courses**
+            **27-hole courses**
             - Bradshaw Farm
             - Erin Hills
             
@@ -515,28 +618,30 @@ def render_course_analysis():
         with col2:
             st.info(
                 """
-            **Shotgun Starts**
+            **Shotgun starts**
             - Indian Creek (9 holes)
             - Pinehurst 4 (10 holes)
             
-            *Require start_hole normalization*
+            *Require start_hole normalisation*
             """
             )
 
         with col3:
             st.info(
                 """
-            **9-Hole with 18-Hole Rounds**
+            **9-hole with 18-hole rounds**
             - American Falls
             
             *47% replay for 18 holes*
             """
             )
 
+    show_sql(SQL_COURSE_CONFIG, "Course configuration query")
+
 
 def render_critical_gaps():
     """Render the critical gaps analysis page."""
-    st.title("⚠️ Critical Data Gaps")
+    st.title("⚠️ Critical data gaps")
 
     st.markdown(
         """
@@ -544,8 +649,6 @@ def render_critical_gaps():
     Each course is evaluated across 4 tiers of data quality.
     """
     )
-
-    show_sql(SQL_CRITICAL_GAPS, "Critical Gaps Query")
 
     gaps_df = run_query(SQL_CRITICAL_GAPS)
 
@@ -574,9 +677,9 @@ def render_critical_gaps():
         )
 
         fig.update_layout(
-            title="Usability Score by Course",
+            title="Usability score by course",
             xaxis_title="Course",
-            yaxis_title="Usability Score (%)",
+            yaxis_title="Usability score (%)",
             plot_bgcolor="rgba(0,0,0,0)",
             paper_bgcolor="rgba(0,0,0,0)",
             yaxis=dict(range=[0, 105]),
@@ -594,7 +697,7 @@ def render_critical_gaps():
         st.divider()
 
         # Status by tier
-        st.markdown("### Status by Data Tier")
+        st.markdown("### Status by data tier")
 
         status_cols = [
             "pace_data_status",
@@ -602,7 +705,7 @@ def render_critical_gaps():
             "device_health_status",
             "round_config_status",
         ]
-        tier_names = ["Pace Data", "Location Data", "Device Health", "Round Config"]
+        tier_names = ["Pace data", "Location data", "Device health", "Round config"]
 
         for course in gaps_df["course_id"].unique():
             course_data = gaps_df[gaps_df["course_id"] == course].iloc[0]
@@ -617,14 +720,13 @@ def render_critical_gaps():
                     zip(cols, status_cols, tier_names)
                 ):
                     status = course_data[tier]
-                    if status == "EXCELLENT":
-                        col.success(f"**{name}**\n\n✅ {status}")
-                    elif status == "GOOD":
-                        col.success(f"**{name}**\n\n✅ {status}")
-                    elif status == "FAIR":
-                        col.warning(f"**{name}**\n\n⚠️ {status}")
+                    # Status already contains emoji, just display it with correct background
+                    if "GOOD" in str(status) or "EXCELLENT" in str(status):
+                        col.success(f"**{name}**\n\n{status}")
+                    elif "WARNING" in str(status) or "FAIR" in str(status):
+                        col.warning(f"**{name}**\n\n{status}")
                     else:
-                        col.error(f"**{name}**\n\n❌ {status}")
+                        col.error(f"**{name}**\n\n{status}")
 
                 if course_data["top_recommendation"]:
                     st.markdown(
@@ -634,13 +736,16 @@ def render_critical_gaps():
         st.divider()
 
         # Full table
-        st.markdown("### Detailed Gap Analysis")
+        st.markdown("### Detailed gap analysis")
         st.dataframe(gaps_df, use_container_width=True, hide_index=True)
+
+        # SQL query before action items
+        show_sql(SQL_CRITICAL_GAPS, "Critical gaps query")
 
         st.divider()
 
         # Recommendations summary
-        st.markdown("### 📋 Action Items")
+        st.markdown("### 📋 Action items")
 
         for _, row in gaps_df.iterrows():
             if row["top_recommendation"] and row["usability_score"] < 100:
@@ -676,7 +781,7 @@ def render_connection_error():
     
     **Connection Details:**
     - Host: `localhost`
-    - Port: `8080`
+    - Port: `8081`
     - Catalog: `iceberg`
     """
     )

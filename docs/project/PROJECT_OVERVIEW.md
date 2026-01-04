@@ -141,8 +141,9 @@ tagmarshal_data_lakehouse/
 │   ├── erinhills.rounds.csv
 │   ├── indiancreek.rounds_json.json  # Sample JSON (API format)
 │   └── ...
-├── db/migrations/             # PostgreSQL migrations (ingestion registry)
-├── docker/trino/etc/          # Trino catalog configuration
+├── infrastructure/
+│   ├── database/              # PostgreSQL migrations (ingestion registry)
+│   └── services/trino/etc/    # Trino catalog configuration
 ├── docs/
 │   ├── runbook_local_dev.md   # Detailed junior-friendly guide
 │   ├── aws_cutover.md         # AWS deployment guide

@@ -680,7 +680,7 @@ registry-init:
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo "  Creating ingestion_log table..."
   echo ""
-  docker exec -i airflow-postgres psql -U airflow -d airflow < db/migrations/001_create_ingestion_log.sql 2>&1 | grep -v "NOTICE\|already exists" || true
+  docker exec -i airflow-postgres psql -U airflow -d airflow < infrastructure/database/001_create_ingestion_log.sql 2>&1 | grep -v "NOTICE\|already exists" || true
   echo ""
   echo "✅ Registry initialized"
   echo ""

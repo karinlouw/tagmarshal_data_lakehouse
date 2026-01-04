@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+*$py.class
+*.so
 .Python
 *.egg-info/
 .pytest_cache/
@@ -10,11 +12,8 @@ __pycache__/
 .ruff_cache/
 .venv/
 venv/
-
-# OS / editor
-.DS_Store
-.idea/
-.vscode/
+env/
+ENV/
 
 # dbt
 target/
@@ -35,17 +34,6 @@ tmp/
 *.parquet
 *.csv
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-env/
-venv/
-ENV/
-.venv
-
 # Jupyter Notebook
 .ipynb_checkpoints
 
@@ -60,10 +48,5 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Data files (uncomment if you want to ignore large data files)
-# *.csv
-# data/
-
 # Logs
 *.log
-
