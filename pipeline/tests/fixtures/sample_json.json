@@ -1,0 +1,59 @@
+[
+  {
+    "_id": "round123",
+    "course": "americanfalls",
+    "startTime": "2024-01-15T10:00:00Z",
+    "locations": [
+      {
+        "hole": 1,
+        "sectionNumber": 1,
+        "holeSection": 1,
+        "startTime": 1000.5,
+        "fixCoordinates": [-122.123, 45.678],
+        "isProjected": false,
+        "isProblem": false,
+        "isCache": false,
+        "paceGap": 0.5,
+        "positionalGap": 0.3,
+        "pace": 4.2,
+        "batteryPercentage": 95.0
+      },
+      {
+        "hole": 1,
+        "sectionNumber": 2,
+        "holeSection": 2,
+        "startTime": 1005.2,
+        "fixCoordinates": [-122.124, 45.679],
+        "isProjected": false,
+        "isProblem": false,
+        "isCache": false,
+        "paceGap": 0.6,
+        "positionalGap": 0.4,
+        "pace": 4.3,
+        "batteryPercentage": 94.5
+      }
+    ]
+  },
+  {
+    "_id": "round456",
+    "course": "americanfalls",
+    "startTime": "2024-01-15T11:00:00Z",
+    "locations": [
+      {
+        "hole": 2,
+        "sectionNumber": 3,
+        "holeSection": 3,
+        "startTime": 2000.0,
+        "fixCoordinates": [-122.125, 45.680],
+        "isProjected": false,
+        "isProblem": false,
+        "isCache": false,
+        "paceGap": 0.7,
+        "positionalGap": 0.5,
+        "pace": 4.4,
+        "batteryPercentage": 93.0
+      }
+    ]
+  }
+]
+

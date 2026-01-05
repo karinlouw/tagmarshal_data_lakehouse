@@ -134,8 +134,10 @@ def show_sql(sql: str, title: str = "SQL Query"):
 
 
 def load_query(filename: str) -> str:
-    """Load SQL query from queries/exploration directory."""
-    query_path = Path(__file__).parent.parent / "queries" / "exploration" / filename
+    """Load SQL query from pipeline/queries/exploration directory."""
+    query_path = (
+        Path(__file__).parent.parent / "pipeline" / "queries" / "exploration" / filename
+    )
     with open(query_path, "r") as f:
         return f.read().strip()
 

@@ -1,0 +1,20 @@
+[
+    {
+        "_id": "round123",
+        "course": "americanfalls",
+        "startTime": "2024-01-15T10:00:00Z",
+        "locations": [
+            {
+                "hole": 1,
+                "sectionNumber": 1,
+                "startTime": 1000.5,
+                "fixCoordinates": [
+                    200.0,
+                    100.0
+                ],
+                "paceGap": 0.5,
+                "batteryPercentage": 95.0
+            }
+        ]
+    }
+]

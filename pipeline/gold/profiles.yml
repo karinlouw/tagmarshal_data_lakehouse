@@ -1,0 +1,14 @@
+tagmarshal_lakehouse:
+  target: local
+  outputs:
+    local:
+      type: trino
+      method: none
+      host: trino
+      port: 8080
+      user: dbt
+      catalog: iceberg
+      schema: gold
+      threads: 4
+
+

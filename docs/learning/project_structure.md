@@ -1,124 +1,71 @@
-# Project Structure Guide
+# Project Structure
 
-This document explains the folder structure of the TagMarshal Data Lakehouse project. Everything is organized to be simple and clear for junior developers.
+This document explains the folder structure of the TagMarshal Data Lakehouse.
 
-## Root Directory
+## Top-Level Structure
 
 ```
 .
-├── README.md              # Main project overview and quick start
-├── Justfile              # Command shortcuts (use `just --list` to see all)
-├── docker-compose.yml    # Docker services (MinIO, Spark, Trino, Airflow, etc.)
-├── .gitignore            # Files to ignore in git (logs, cache, etc.)
-│
-├── config/               # Configuration files
-├── data/                 # Sample data files (gitignored)
-├── dashboard/            # Streamlit dashboard
-├── docs/                 # All documentation
-├── infrastructure/      # Infrastructure configuration
-├── jobs/                 # Spark ETL jobs
-├── monitoring/          # Monitoring & alerting configs
-├── notebooks/           # Jupyter notebooks
-├── orchestration/        # Airflow DAGs
-├── queries/             # SQL exploration queries
-├── schemas/             # Table schemas & DDLs
-├── scripts/              # Utility scripts
-├── tests/               # Integration & quality tests
-├── transform/            # dbt project
-└── validations/          # Data validation rules
+├── pipeline/          # Core ETL pipeline (template-able)
+├── dashboard/         # Streamlit data quality app (swappable)
+├── data/              # Sample data files (swappable)
+├── config/            # Environment configs
+├── docs/              # User guides and learning
+├── notebooks/         # Jupyter exploration
+├── docker-compose.yml # Docker services
+├── Justfile           # Command runner
+└── README.md          # Project overview
 ```
 
-## Key Directories Explained
+## Pipeline Folder
 
-### `config/`
-Environment configuration files:
-- `local.env` - Local development settings
-- `aws.env` - AWS production settings
-
-**When to edit:** When you need to change database connections, S3 buckets, or API keys.
-
-### `dashboard/`
-Streamlit web application for data quality visualization:
-- `app.py` - Main dashboard code
-- `requirements.txt` - Python dependencies
-
-**Run it:** `just dashboard`
-
-### `docs/`
-All project documentation:
-- `learning/` - Learning guides (start here!)
-- `project/` - Architecture and design docs
-- `proposals/` - Client proposals
-
-**Start here:** `docs/learning/pipeline_walkthrough.md`
-
-### `infrastructure/`
-Infrastructure configuration files:
-- `database/` - Database migration scripts (SQL)
-- `services/` - Docker service configurations (Trino, etc.)
-
-**When to edit:** When you need to add database tables or modify service configs.
-
-### `jobs/spark/`
-PySpark ETL jobs that transform data:
-- `silver_etl.py` - Transforms Bronze → Silver
-- `lib/` - Shared utility code
-
-**How it works:** Airflow runs these jobs via `spark-submit`
-
-### `orchestration/airflow/`
-Airflow configuration and DAGs:
-- `dags/` - DAG definitions (Bronze, Silver, Gold)
-- `requirements.txt` - Python dependencies for Airflow
-
-**Access UI:** http://localhost:8080 (after `just up`)
-
-### `scripts/`
-Utility scripts for manual operations:
-- `backfill.py` - Bulk data processing with resume capability
-
-**When to use:** For one-off tasks or bulk operations
-
-### `transform/dbt_project/`
-dbt project for building Gold layer:
-- `models/gold/` - SQL models for analytics
-- `dbt_project.yml` - dbt configuration
-
-**Run it:** `just gold`
-
-## Data Flow
+The `pipeline/` folder contains all ETL code and can be used as a template:
 
 ```
-1. Upload CSV/JSON → data/ (or Bronze bucket)
-2. Bronze DAG → Ingests to Bronze layer
-3. Silver ETL → Transforms to Silver layer
-4. Gold dbt → Builds analytics models
-5. Dashboard → Visualizes results
+pipeline/
+├── bronze/            # Raw data ingestion
+│   ├── ingest.py      # Upload utilities
+│   └── schema.md      # Bronze schema docs
+├── silver/            # Data transformation
+│   ├── etl.py         # Spark ETL script
+│   ├── schema.md      # Silver schema
+│   └── data_dictionary.md
+├── gold/              # Analytics (dbt)
+│   ├── models/        # dbt SQL models
+│   ├── tests/         # dbt tests
+│   └── schema.md      # Gold schema docs
+├── orchestration/     # Airflow DAGs
+│   └── dags/          # DAG definitions
+├── infrastructure/    # Docker & database
+│   ├── docker/        # Dockerfiles
+│   ├── database/      # SQL migrations
+│   └── services/      # Trino config
+├── lib/               # Shared Python code
+│   └── tm_lakehouse/  # Package modules
+├── queries/           # SQL queries
+│   ├── exploration/   # Dashboard queries
+│   └── examples/      # Sample queries
+├── scripts/           # Utilities
+│   └── backfill.py
+├── tests/             # Integration tests
+├── monitoring/        # Alerting configs
+└── docs/              # Technical docs
 ```
 
-## Where to Start
+## Swappable Components
 
-1. **New to the project?** → Read `README.md` and `docs/learning/pipeline_walkthrough.md`
-2. **Want to run something?** → Check `docs/learning/command_reference.md`
-3. **Understanding architecture?** → Read `docs/project/PROJECT_OVERVIEW.md`
-4. **Working on code?** → Each folder has its own `README.md`
+For a new project, you would keep `pipeline/` as-is and swap:
 
-## File Naming Conventions
+1. **`data/`** - Replace with your data files
+2. **`dashboard/`** - Build a new Streamlit app
+3. **`config/`** - Update environment variables
 
-- **Python files**: `snake_case.py`
-- **SQL files**: `snake_case.sql`
-- **Config files**: `kebab-case.env`
-- **Documentation**: `kebab-case.md`
+## Key Files
 
-## Important Files
-
-- **`Justfile`** - Your best friend! Use `just <command>` instead of long Docker commands
-- **`docker-compose.yml`** - Defines all services (don't edit unless you know what you're doing)
-- **`config/local.env`** - Local settings (safe to edit)
-
-## Questions?
-
-- Check the `README.md` in each folder
-- Read the learning guides in `docs/learning/`
-- Look at code comments (they're written to be helpful!)
-
+| File | Purpose |
+|------|---------|
+| `Justfile` | All pipeline commands |
+| `docker-compose.yml` | Docker service definitions |
+| `config/local.env` | Local environment settings |
+| `pipeline/silver/etl.py` | Main transformation script |
+| `pipeline/gold/dbt_project.yml` | dbt configuration |

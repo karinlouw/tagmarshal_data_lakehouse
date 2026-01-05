@@ -1,139 +1,192 @@
 # TagMarshal Data Lakehouse
 
-A **local-first, AWS-ready** data lakehouse for golf course round data. Built with modern data engineering best practices: medallion architecture, Apache Iceberg tables, and full observability.
+A local-first, AWS-ready data lakehouse for golf course telemetry data.
 
-> **Note:** This lakehouse processes **round strings** (pre-processed data from TagMarshal's system), not raw GPS telemetry. The raw GPS pings have already been processed into structured rounds with pace calculations, hole assignments, and section tracking.
+## Pipeline Overview
 
-## 🚀 Quick Start
+```
+Source Files → Bronze (raw) → Silver (cleaned) → Gold (analytics) → Dashboard
+```
 
-### 1. Start the stack
+---
+
+## Pipeline Steps
+
+### Step 0: Start Infrastructure
+
 ```bash
 just up
 ```
 
-### 2. Ingest data (Bronze layer)
+Starts MinIO, Iceberg REST, Trino, Spark, Airflow, and PostgreSQL.
+
+### Step 1: Source Data
+
+Place CSV or JSON files in the `data/` folder.
+
+**Supported formats:**
+- CSV (flattened): `rounds.csv` with `locations[N].startTime` columns
+- JSON (MongoDB): `rounds.json` with nested `locations` array
+
+### Step 2: Bronze Layer (Raw Ingestion)
+
+Upload raw files to the landing zone without transformation.
+
 ```bash
-just bronze-upload course_id=<course_id> input=<path_to_file>
+just bronze-upload course_id=bradshawfarmgc input=data/rounds.csv
 ```
 
-### 3. Transform to Silver
+**What happens:**
+- File validated (required columns: `_id`, `course`, `locations`)
+- Uploaded to MinIO: `s3://tm-lakehouse-landing/course_id=X/ingest_date=Y/`
+- Idempotent: skips if file already exists
+
+**Schema:** See `pipeline/bronze/schema.md`
+
+### Step 3: Silver Layer (Transformation)
+
+Transform raw data into clean, queryable Iceberg tables.
+
 ```bash
-just silver course_id=<course_id> ingest_date=YYYY-MM-DD
+just silver course_id=bradshawfarmgc ingest_date=2025-06-28
 ```
 
-### 4. Build analytics (Gold layer)
+**What happens:**
+- Reads Bronze CSV/JSON from MinIO
+- Explodes `locations[]` array → one row per GPS fix
+- Deduplicates by `(round_id, fix_timestamp)`
+- Derives fields: `nine_number`, `geometry_wkt`, `event_date`
+- Writes to Iceberg table: `silver.fact_telemetry_event`
+
+**Schema:** See `pipeline/silver/schema.md`
+
+### Step 4: Gold Layer (Analytics)
+
+Build aggregated views for analysis using dbt.
+
 ```bash
 just gold
 ```
 
-### 5. View dashboard
+**What happens:**
+- dbt reads Silver Iceberg table via Trino
+- Builds analytical models:
+  - `pace_summary_by_round` - Round performance metrics
+  - `device_health_errors` - Device issue tracking
+  - `signal_quality_rounds` - GPS quality analysis
+  - `data_quality_overview` - Completeness scores
+  - `critical_column_gaps` - Missing data analysis
+  - `course_configuration_analysis` - Course setup patterns
+
+**Schema:** See `pipeline/gold/schema.md`
+
+### Step 5: View Dashboard
+
+Explore data quality and insights via Streamlit.
+
 ```bash
 just dashboard
 ```
 
-## 📁 Project Structure
+Opens http://localhost:8501 with:
+- Executive summary
+- Data quality analysis
+- Course analysis
+- Course map (GIS)
+- Critical gaps
+
+---
+
+## Backfill & Daily Operations
+
+### Backfill Historical Data
+
+Process all pending course/dates from the ingestion registry:
+
+```bash
+python pipeline/scripts/backfill.py
+```
+
+**Features:**
+- Tracks processed files in PostgreSQL registry
+- Resumable: continues from last successful record
+- Retry logic for failed jobs
+- Parallel batch processing
+
+### Daily Updates (Automated)
+
+Airflow DAGs run the pipeline automatically:
+
+```
+bronze_ingest_dag → silver_etl_dag → gold_dbt_dag
+```
+
+Trigger manually:
+```bash
+just airflow-trigger dag_id=silver_etl
+```
+
+---
+
+## Project Structure
 
 ```
 .
-├── config/              # Environment configs (local.env, aws.env)
-├── data/                # Sample CSV/JSON files (gitignored)
-├── dashboard/           # Streamlit data quality dashboard
-├── docs/                # Documentation
-│   ├── learning/        # Learning guides (pipeline, dbt, airflow, etc.)
-│   ├── project/         # Project overview and architecture
-│   └── proposals/       # Client proposals
-├── infrastructure/      # Infrastructure configuration
-│   ├── database/        # Database migrations
-│   └── services/        # Docker service configs (Trino, etc.)
-├── jobs/                # Spark ETL jobs
-│   └── spark/           # Silver ETL transformation
-├── monitoring/          # Monitoring & alerting configs
-├── notebooks/           # Jupyter notebooks for exploration
-├── orchestration/       # Airflow DAGs and config
-│   └── airflow/         # DAG definitions
-├── queries/             # SQL exploration queries
-│   ├── exploration/     # Dashboard and analysis queries
-│   └── examples/        # Example queries
-├── schemas/             # Table schemas and DDLs
-│   ├── bronze/          # Bronze layer schemas
-│   ├── silver/          # Silver layer schemas
-│   └── gold/            # Gold layer schemas
-├── scripts/             # Utility scripts (backfill, etc.)
-├── tests/               # Integration and data quality tests
-│   ├── integration/     # End-to-end pipeline tests
-│   ├── data_quality/    # Data quality validation tests
-│   └── fixtures/        # Test data files
-├── transform/           # dbt project for Gold layer
-│   └── dbt_project/     # dbt models and config
-└── validations/         # Data validation rules
-    ├── rules/           # Validation rule definitions
-    └── thresholds/      # Quality thresholds
+├── pipeline/                 # Core ETL pipeline (template-able)
+│   ├── bronze/               # Bronze layer (raw ingestion)
+│   ├── silver/               # Silver layer (transformation)
+│   ├── gold/                 # Gold layer (dbt analytics)
+│   ├── orchestration/        # Airflow DAGs
+│   ├── infrastructure/       # Docker, database, services
+│   ├── queries/              # SQL queries
+│   ├── lib/                  # Shared Python utilities
+│   ├── scripts/              # Backfill & utilities
+│   └── docs/                 # Technical documentation
+├── dashboard/                # Streamlit app (swappable)
+├── data/                     # Sample data files (swappable)
+├── config/                   # Environment configs
+├── docs/                     # User guides & learning
+├── notebooks/                # Jupyter exploration
+├── docker-compose.yml
+├── Justfile
+└── README.md
 ```
 
-## 🏗️ Architecture
+---
 
-**Tech Stack:**
-- **Storage**: MinIO (local) / S3 (AWS)
-- **Table Format**: Apache Iceberg
-- **ETL**: Apache Spark
-- **SQL Engine**: Trino (local) / Athena (AWS)
-- **Orchestration**: Apache Airflow
-- **Transforms**: dbt
+## Quick Reference
 
-**Data Flow:**
-```
-CSV/JSON → Bronze (raw) → Silver (cleaned) → Gold (analytics)
-```
+| Task | Command |
+|------|---------|
+| Start stack | `just up` |
+| Stop stack | `just down` |
+| Check status | `just status` |
+| Upload to Bronze | `just bronze-upload course_id=X input=file.csv` |
+| Transform to Silver | `just silver course_id=X ingest_date=YYYY-MM-DD` |
+| Build Gold models | `just gold` |
+| View dashboard | `just dashboard` |
+| Query with Trino | `just trino-query "SELECT * FROM silver.fact_telemetry_event LIMIT 10"` |
+| Run all commands | `just --list` |
 
-## 📚 Documentation
+---
 
-- **Getting Started**: `docs/runbook_local_dev.md`
-- **Pipeline Walkthrough**: `docs/learning/pipeline_walkthrough.md`
-- **Command Reference**: `docs/learning/command_reference.md`
-- **Project Overview**: `docs/project/PROJECT_OVERVIEW.md`
-- **AWS Migration**: `docs/aws_cutover.md`
+## Documentation
 
-## 🔧 Configuration
+- **Pipeline walkthrough:** `docs/learning/pipeline_walkthrough.md`
+- **Command reference:** `docs/learning/command_reference.md`
+- **Technical architecture:** `pipeline/docs/architecture.md`
+- **Layer schemas:** `pipeline/{bronze,silver,gold}/schema.md`
 
-### Local Development
-Edit `config/local.env` to change local settings.
+---
 
-### Switch to API Source
-When you get API access, update `config/local.env`:
-```bash
-TM_DATA_SOURCE=api
-TM_API_KEY=your-api-key-here
-```
+## Technology Stack
 
-## 💡 For Junior Developers
-
-This project is designed to be **simple and clear**:
-- Each folder has a `README.md` explaining its purpose
-- Code is well-commented and straightforward
-- Learning guides in `docs/learning/` explain each component
-- Use `just` commands (see `docs/learning/command_reference.md`) instead of complex Docker commands
-
-## 🛠️ Common Tasks
-
-```bash
-# View all available commands
-just --list
-
-# Check service status
-just status
-
-# Run data quality checks
-just dq
-
-# Query data with Trino
-just trino-query "SELECT * FROM iceberg.silver.fact_telemetry_event LIMIT 10"
-```
-
-## 📊 Dashboard
-
-The Streamlit dashboard shows data quality metrics and insights:
-```bash
-just dashboard
-```
-
-Access at http://localhost:8501
+| Component | Technology |
+|-----------|------------|
+| Storage | MinIO (local) / S3 (AWS) |
+| Table Format | Apache Iceberg |
+| ETL | Apache Spark |
+| SQL Engine | Trino |
+| Orchestration | Apache Airflow |
+| Transforms | dbt |
+| Dashboard | Streamlit |

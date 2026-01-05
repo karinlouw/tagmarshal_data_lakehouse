@@ -53,3 +53,9 @@ Airflow DAG and immediately returns - it doesn't wait for the actual Spark job t
 - Understand the DAGs
 
 - Lineage
+
+- Check sizes of parquet vs csv/json
+
+- proper error handling
+
+- standardize time

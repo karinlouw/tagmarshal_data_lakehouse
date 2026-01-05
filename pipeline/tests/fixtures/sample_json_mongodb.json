@@ -1,0 +1,24 @@
+[
+  {
+    "_id": {"$oid": "507f1f77bcf86cd799439011"},
+    "course": "americanfalls",
+    "startTime": {"$date": "2024-01-15T10:00:00Z"},
+    "locations": [
+      {
+        "hole": 1,
+        "sectionNumber": 1,
+        "holeSection": 1,
+        "startTime": 1000.5,
+        "fixCoordinates": [-122.123, 45.678],
+        "isProjected": false,
+        "isProblem": false,
+        "isCache": false,
+        "paceGap": 0.5,
+        "positionalGap": 0.3,
+        "pace": 4.2,
+        "batteryPercentage": 95.0
+      }
+    ]
+  }
+]
+

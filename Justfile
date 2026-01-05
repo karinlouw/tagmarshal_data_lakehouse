@@ -37,11 +37,36 @@ up:
   done
   
   echo ""
+  echo "🗂️  Initializing Iceberg schemas..."
+  # Wait for Trino to be ready
+  for i in {1..12}; do
+    if curl -s http://localhost:8081/v1/info 2>/dev/null | grep -q "starting.*false"; then
+      # Ensure silver schema exists
+      docker exec trino trino --execute "CREATE SCHEMA IF NOT EXISTS iceberg.silver WITH (location = 's3://tm-lakehouse-source-store/warehouse/silver')" 2>&1 | grep -v jline > /dev/null || true
+      
+      # Ensure gold schema has correct location (tm-lakehouse-serve)
+      GOLD_LOCATION=$(docker exec trino trino --execute "SHOW CREATE SCHEMA iceberg.gold" 2>&1 | grep -o "s3://[^']*" || echo "")
+      if [ "$GOLD_LOCATION" != "s3://tm-lakehouse-serve/warehouse/gold" ]; then
+        docker exec trino trino --execute "DROP SCHEMA IF EXISTS iceberg.gold CASCADE" 2>&1 | grep -v jline > /dev/null || true
+        docker exec trino trino --execute "CREATE SCHEMA iceberg.gold WITH (location = 's3://tm-lakehouse-serve/warehouse/gold')" 2>&1 | grep -v jline > /dev/null
+      fi
+      echo "✅ Schemas initialized (Silver → source-store, Gold → serve)"
+      break
+    fi
+    if [ $i -eq 12 ]; then
+      echo "⚠️  Trino not ready yet - schemas will be initialized when Trino starts"
+      break
+    fi
+    sleep 5
+  done
+  
+  echo ""
   just ui
 
   echo ""
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo "💡 Run 'just verify' to check all dependencies are ready"
+  echo "💡 Run 'just init-schemas' to fix schema locations if needed"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # Wait for Airflow to be ready (use after 'just up' if Airflow wasn't ready)
@@ -201,7 +226,7 @@ verify:
   fi
   echo ""
   
-  # 5. Check Trino is healthy
+  # 5. Check Trino is healthy and initialize schemas
   echo "🔷 Checking Trino..."
   if curl -s http://localhost:8081/v1/info 2>/dev/null | grep -q "starting.*false"; then
     echo "   ✅ Trino is ready"
@@ -210,6 +235,16 @@ verify:
       echo "   ✅ Iceberg catalog connected"
     else
       echo "   ⚠️  Iceberg catalog may need initialization"
+    fi
+    # Ensure gold schema has correct location (tm-lakehouse-serve, not source-store)
+    GOLD_LOCATION=$(docker exec trino trino --execute "SHOW CREATE SCHEMA iceberg.gold" 2>&1 | grep -o "s3://[^']*" || echo "")
+    if [ "$GOLD_LOCATION" = "s3://tm-lakehouse-serve/warehouse/gold" ]; then
+      echo "   ✅ Gold schema location correct (tm-lakehouse-serve)"
+    else
+      echo "   ⚙️  Fixing gold schema location..."
+      docker exec trino trino --execute "DROP SCHEMA IF EXISTS iceberg.gold CASCADE" 2>&1 | grep -v jline > /dev/null || true
+      docker exec trino trino --execute "CREATE SCHEMA iceberg.gold WITH (location = 's3://tm-lakehouse-serve/warehouse/gold')" 2>&1 | grep -v jline > /dev/null
+      echo "   ✅ Gold schema created with correct location (tm-lakehouse-serve)"
     fi
   else
     echo "   ❌ Trino not ready"
@@ -249,6 +284,66 @@ verify:
     echo ""
     exit 1
   fi
+
+# Initialize Iceberg schemas with correct warehouse locations
+init-schemas:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  
+  echo ""
+  echo "🗂️  INITIALIZING ICEBERG SCHEMAS"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  
+  # Wait for Trino to be ready
+  echo "  ⏳ Waiting for Trino..."
+  for i in {1..12}; do
+    if curl -s http://localhost:8081/v1/info 2>/dev/null | grep -q "starting.*false"; then
+      echo "  ✅ Trino is ready"
+      break
+    fi
+    if [ $i -eq 12 ]; then
+      echo "  ❌ Trino not ready. Start the stack first: just up"
+      exit 1
+    fi
+    sleep 5
+  done
+  echo ""
+  
+  # Ensure silver schema exists (usually auto-created by Spark)
+  echo "  📊 Checking silver schema..."
+  SILVER_EXISTS=$(docker exec trino trino --execute "SHOW SCHEMAS FROM iceberg" 2>&1 | grep -c "silver" || echo "0")
+  if [ "$SILVER_EXISTS" -gt 0 ]; then
+    echo "     ✅ silver schema exists"
+  else
+    echo "     ⚙️  Creating silver schema..."
+    docker exec trino trino --execute "CREATE SCHEMA IF NOT EXISTS iceberg.silver WITH (location = 's3://tm-lakehouse-source-store/warehouse/silver')" 2>&1 | grep -v jline > /dev/null
+    echo "     ✅ silver schema created"
+  fi
+  
+  # Ensure gold schema has correct location
+  echo "  🏆 Checking gold schema..."
+  GOLD_LOCATION=$(docker exec trino trino --execute "SHOW CREATE SCHEMA iceberg.gold" 2>&1 | grep -o "s3://[^']*" || echo "")
+  if [ "$GOLD_LOCATION" = "s3://tm-lakehouse-serve/warehouse/gold" ]; then
+    echo "     ✅ gold schema location correct (tm-lakehouse-serve)"
+  else
+    if [ -n "$GOLD_LOCATION" ]; then
+      echo "     ⚠️  gold schema has wrong location: $GOLD_LOCATION"
+      echo "     ⚙️  Dropping and recreating..."
+      docker exec trino trino --execute "DROP SCHEMA IF EXISTS iceberg.gold CASCADE" 2>&1 | grep -v jline > /dev/null || true
+    fi
+    docker exec trino trino --execute "CREATE SCHEMA iceberg.gold WITH (location = 's3://tm-lakehouse-serve/warehouse/gold')" 2>&1 | grep -v jline > /dev/null
+    echo "     ✅ gold schema created with correct location"
+  fi
+  
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "✅ SCHEMAS INITIALIZED"
+  echo ""
+  echo "  Locations:"
+  echo "    Silver → s3://tm-lakehouse-source-store/warehouse/silver"
+  echo "    Gold   → s3://tm-lakehouse-serve/warehouse/gold"
+  echo ""
 
 logs:
   docker compose --env-file config/local.env logs -f --tail=200
@@ -952,6 +1047,9 @@ gold:
   echo "    • gold.pace_summary_by_round"
   echo "    • gold.signal_quality_rounds"
   echo "    • gold.device_health_errors"
+  echo "    • gold.course_configuration_analysis"
+  echo "    • gold.critical_column_gaps"
+  echo "    • gold.data_quality_overview"
   echo ""
   
   START_TIME=$(date +%s)
@@ -1005,9 +1103,9 @@ gold:
   
   # Show row counts for gold tables
   echo "  📈 Gold Table Row Counts:"
-  for table in pace_summary_by_round signal_quality_rounds device_health_errors; do
+  for table in pace_summary_by_round signal_quality_rounds device_health_errors course_configuration_analysis critical_column_gaps data_quality_overview; do
     ROWS=$(docker exec trino trino --execute \
-      "SELECT count(*) FROM iceberg.gold.$table" 2>&1 | grep -v "jline\|WARNING" | tr -d '"' || echo "?")
+      "SELECT count(*) FROM iceberg.gold.$table" 2>&1 | grep -v "jline\|WARNING" | tr -d '"' || echo "0")
     echo "     $table: $ROWS rows"
   done
   echo ""
@@ -1089,7 +1187,7 @@ registry-init:
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo "  Creating ingestion_log table..."
   echo ""
-  docker exec -i airflow-postgres psql -U airflow -d airflow < infrastructure/database/001_create_ingestion_log.sql 2>&1 | grep -v "NOTICE\|already exists" || true
+  docker exec -i airflow-postgres psql -U airflow -d airflow < pipeline/infrastructure/database/001_create_ingestion_log.sql 2>&1 | grep -v "NOTICE\|already exists" || true
   echo ""
   echo "✅ Registry initialized"
   echo ""
@@ -1252,7 +1350,7 @@ backfill-preview layer="silver":
   echo "🔍 BACKFILL PREVIEW: {{layer}}"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo ""
-  python3 scripts/backfill.py {{layer}} --dry-run
+  python3 pipeline/scripts/backfill.py {{layer}} --dry-run
   echo ""
 
 # Run Silver backfill (resumable)
@@ -1267,7 +1365,7 @@ backfill-silver course_id="" batch_size="3":
     COURSE_ARG="--course {{course_id}}"
   fi
   
-  python3 scripts/backfill.py silver $COURSE_ARG --batch-size {{batch_size}}
+  python3 pipeline/scripts/backfill.py silver $COURSE_ARG --batch-size {{batch_size}}
   echo ""
 
 # Retry all failed jobs
