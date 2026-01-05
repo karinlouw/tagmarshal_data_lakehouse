@@ -43,6 +43,11 @@ just bronze-upload course_id=bradshawfarmgc input=data/rounds.csv
 
 **Schema:** See `pipeline/bronze/schema.md`
 
+### Facility Nuances
+*   **Bradshaw Farm GC:** High volume 27-Hole Course (Jun-Aug peak). Handled via dynamic unit mapping.
+*   **Indian Creek:** Exclusive low-volume, random starts (Nov-Feb peak). Handled via non-sequential processing.
+*   **American Falls:** 9-Hole course playing 18-hole rounds (Jun-Aug peak). Handled via loop detection (`nine_number` 1 vs 2).
+
 ### Step 3: Silver Layer (Transformation)
 
 Transform raw data into clean, queryable Iceberg tables.
@@ -59,6 +64,22 @@ just silver course_id=bradshawfarmgc ingest_date=2025-06-28
 - Writes to Iceberg table: `silver.fact_telemetry_event`
 
 **Schema:** See `pipeline/silver/schema.md`
+
+### Step 3.5: Topology Discovery (Automated)
+
+The pipeline automatically discovers course layouts (27-hole courses, shotgun start patterns) from the Silver data and updates the topology configuration.
+
+```bash
+just generate-topology
+```
+
+It also exposes this configuration as a queryable Iceberg table:
+
+```bash
+just seed-topology
+```
+
+This ensures you can join `fact_telemetry_event` with `dim_facility_topology` to decode course units (e.g. Red/White/Blue nines).
 
 ### Step 4: Gold Layer (Analytics)
 

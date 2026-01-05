@@ -353,6 +353,19 @@ ORDER BY avg_pace DESC;
 
 This "long format" is much easier to query and aggregate!
 
+### 🧩 Automated Topology Discovery
+
+For complex courses (e.g. 27-hole facilities like Bradshaw Farm), the system automatically discovers the "Nine" structure by analyzing section number ranges.
+
+1.  **Discovery:** The `generate-topology` script scans Silver data and updates `pipeline/silver/seeds/dim_facility_topology.csv`.
+2.  **Enrichment:** The ETL job uses this CSV to tag every row with `nine_number` (1, 2, 3) and `unit_id`.
+3.  **Seeding:** The `seed-topology` command uploads this CSV to MinIO and registers it as an Iceberg table `dim_facility_topology`.
+
+You can query the active topology:
+```sql
+SELECT * FROM iceberg.silver.dim_facility_topology;
+```
+
 **Pace interpretation:**
 - `pace = 0` → On pace with goal time
 - `pace = -319` → 319 seconds (5+ min) **ahead** of goal

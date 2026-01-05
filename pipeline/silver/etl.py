@@ -321,49 +321,95 @@ def main():
         ).cast("timestamp"),
     )
 
-    out = (
-        long_df.select(
-            "round_id",
-            "course_id",
-            "ingest_date",
-            fix_ts.alias("fix_timestamp"),
-            # Round configuration (for proper multi-nine and shotgun start handling)
-            "start_hole",
-            "start_section",
-            "end_section",
-            "is_nine_hole",
-            "current_nine",
-            "goal_time",
-            "is_complete",
-            # Location fields
-            F.col("location.location_index"),
-            F.col("location.hole_number"),
-            F.col("location.section_number"),
-            F.col("location.hole_section"),
-            F.col("location.longitude"),
-            F.col("location.latitude"),
-            F.col("location.is_cache"),
-            F.col("location.is_projected"),
-            F.col("location.is_problem"),
-            F.col("location.pace_gap"),
-            F.col("location.positional_gap"),
-            F.col("location.pace"),
-            F.col("location.battery_percentage"),
+    # Initial selection and transformation
+    out = long_df.select(
+        "round_id",
+        "course_id",
+        "ingest_date",
+        fix_ts.alias("fix_timestamp"),
+        # Round configuration (for proper multi-nine and shotgun start handling)
+        "start_hole",
+        "start_section",
+        "end_section",
+        "is_nine_hole",
+        "current_nine",
+        "goal_time",
+        "is_complete",
+        # Location fields
+        F.col("location.location_index"),
+        F.col("location.hole_number"),
+        F.col("location.section_number"),
+        F.col("location.hole_section"),
+        F.col("location.longitude"),
+        F.col("location.latitude"),
+        F.col("location.is_cache"),
+        F.col("location.is_projected"),
+        F.col("location.is_problem"),
+        F.col("location.pace_gap"),
+        F.col("location.positional_gap"),
+        F.col("location.pace"),
+        F.col("location.battery_percentage"),
+    ).withColumn("event_date", F.to_date("fix_timestamp"))
+
+    # Derive which nine the location is in based on topology mapping
+    # This replaces the hardcoded logic with a data-driven approach using dim_facility_topology
+    seed_path = os.path.join(
+        os.path.dirname(__file__), "seeds", "dim_facility_topology.csv"
+    )
+
+    if os.path.exists(seed_path):
+        print(f"  Reading Topology: {seed_path}")
+        # Read CSV and cast columns
+        topology_df = (
+            spark.read.option("header", True)
+            .csv(f"file://{seed_path}")
+            .withColumn("section_start", F.col("section_start").cast("int"))
+            .withColumn("section_end", F.col("section_end").cast("int"))
+            .withColumn("nine_number_topo", F.col("nine_number").cast("int"))
+            .withColumn("unit_id", F.col("unit_id").cast("int"))
+            # Drop original string nine_number to avoid confusion
+            .drop("nine_number")
         )
-        .withColumn("event_date", F.to_date("fix_timestamp"))
-        # Derive which nine the location is in based on section_number
-        # This handles 27-hole courses (3 nines) like Bradshaw Farm:
-        #   Sections 1-27 → Nine 1
-        #   Sections 28-54 → Nine 2
-        #   Sections 55+ → Nine 3
-        # Todo: Add this explanation about how we're treating the nine holes to docs
-        .withColumn(
+
+        # Broadcast the topology table as it's small
+        topology_df = F.broadcast(topology_df)
+
+        # Perform join
+        # We use a left join to preserve telemetry rows even if topology is missing
+        out = out.join(
+            topology_df,
+            (F.col("course_id") == F.col("facility_id"))
+            & (F.col("section_number") >= F.col("section_start"))
+            & (F.col("section_number") <= F.col("section_end")),
+            "left",
+        ).drop("facility_id", "section_start", "section_end")
+
+        # Rename the topo column to the expected schema column
+        out = out.withColumnRenamed("nine_number_topo", "nine_number")
+
+        # Handle cases where no topology match was found (missing from CSV)
+        # Fallback to the heuristic for backward compatibility if needed
+        out = out.withColumn(
+            "nine_number",
+            F.coalesce(
+                F.col("nine_number"),
+                F.when(F.col("section_number") <= 27, 1)
+                .when(F.col("section_number") <= 54, 2)
+                .otherwise(3),
+            ),
+        )
+    else:
+        print(f"  ⚠ Topology seed not found at {seed_path}, using fallback logic")
+        out = out.withColumn(
             "nine_number",
             F.when(F.col("section_number") <= 27, 1)
             .when(F.col("section_number") <= 54, 2)
             .otherwise(3),
         )
-        .withColumn(
+
+    # Continue with remaining transformations
+    out = (
+        out.withColumn(
             "geometry_wkt",
             F.when(
                 F.col("longitude").isNotNull() & F.col("latitude").isNotNull(),
@@ -377,8 +423,6 @@ def main():
             ),
         )
         # Add flag to track missing timestamps (for data quality analysis)
-        # Todo: Should we add flags for other missing data?
-        # Keep all rows including NULL timestamps for exploration/audit phase
         .withColumn("is_timestamp_missing", F.col("fix_timestamp").isNull())
     )
 

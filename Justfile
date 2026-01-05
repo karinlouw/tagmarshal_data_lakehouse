@@ -1033,6 +1033,58 @@ silver-all ingest_date="":
   echo ""
   echo "  💡 Config: TM_PIPELINE_MODE=$PIPELINE_MODE (config/local.env)"
   echo ""
+  
+  # Auto-generate topology
+  just generate-topology
+  # Upload and seed topology table
+  just seed-topology
+
+# Generate topology mapping from processed data
+generate-topology:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  
+  echo ""
+  echo "🧩 GENERATING TOPOLOGY"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  
+  # Run generator in Spark container and capture output to tmp file
+  echo "  ⏳ Analyzing Silver data..."
+  docker exec spark python3 /opt/tagmarshal/pipeline/scripts/generate_topology.py --output /tmp/topology.csv
+  
+  # Copy result back to host
+  echo "  📥 Updating local topology file..."
+  docker cp spark:/tmp/topology.csv pipeline/silver/seeds/dim_facility_topology.csv
+  
+  echo ""
+  echo "  ✅ Topology updated: pipeline/silver/seeds/dim_facility_topology.csv"
+  echo "  💡 You can now edit this file to rename units (e.g. 'Unit 1' → 'Red Course')"
+  echo ""
+
+# Seed the topology data into an Iceberg table (for Trino/DBeaver visibility)
+seed-topology:
+  #!/usr/bin/env bash
+  set -euo pipefail
+
+  echo ""
+  echo "🌱 SEEDING TOPOLOGY TABLE"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+
+  # 1. Upload CSV to MinIO
+  echo "  📤 Uploading CSV to MinIO..."
+  cat pipeline/silver/seeds/dim_facility_topology.csv | docker exec -i minio mc pipe myminio/tm-lakehouse-source-store/seeds/dim_facility_topology.csv > /dev/null
+
+  # 2. Run Spark job to load it into Iceberg
+  echo "  ❄️  Loading into Iceberg table (iceberg.silver.dim_facility_topology)..."
+  docker exec spark python3 /opt/tagmarshal/pipeline/scripts/seed_topology.py
+
+  echo ""
+  echo "  ✅ Seeding complete"
+  echo "  📍 Query: SELECT * FROM iceberg.silver.dim_facility_topology"
+  echo ""
+
 
 # Run Gold dbt models
 gold:
