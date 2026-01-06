@@ -69,3 +69,5 @@ How can we flag seasonality?
 Can we start keeping record of the different types of courses? Just a simple table in our database somewhere. SOmewhere where it'll make sense. Like how can we flag seasonality?
 
 We need to raise errors properly
+
+I need them to create and or validate the course_info table, inclduing the course type.
