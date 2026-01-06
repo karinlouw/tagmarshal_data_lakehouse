@@ -28,4 +28,16 @@ sources:
                   min_value: -180
                   max_value: 180
 
+      - name: dim_facility_topology
+        description: "Topology definition mapping course sections to physical units."
+        columns:
+          - name: facility_id
+            tests: [not_null]
+          - name: unit_id
+            tests: [not_null]
+          - name: unit_name
+          - name: nine_number
+          - name: section_start
+          - name: section_end
+
 

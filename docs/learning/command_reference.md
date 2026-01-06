@@ -60,6 +60,18 @@ just silver-all                      # All courses, today
 just silver-all 2024-06-15           # All courses, specific date
 ```
 
+### Topology & Configuration
+| Command | Description |
+|---------|-------------|
+| `just generate-topology` | Generate topology from Silver data |
+| `just seed-topology` | Load topology into Iceberg table |
+| `just topology-refresh` | Regenerate and seed topology (one-shot) |
+| `just seed-course-profile` | Seed course profile reference table |
+
+**Tables created:**
+- `silver.dim_facility_topology`
+- `silver.dim_course_profile`
+
 ### Gold Layer (dbt Analytics)
 | Command | Description |
 |---------|-------------|
@@ -69,6 +81,9 @@ just silver-all 2024-06-15           # All courses, specific date
 - `gold.pace_summary_by_round`
 - `gold.signal_quality_rounds`
 - `gold.device_health_errors`
+- `gold.course_configuration_analysis`
+- `gold.critical_column_gaps`
+- `gold.data_quality_overview`
 
 ---
 
@@ -216,6 +231,8 @@ just backfill-retry silver                # Retry failed Silver jobs
 
 | Command | Description |
 |---------|-------------|
+| `just verify` | Verify stack health and dependencies |
+| `just init-schemas` | Initialize/fix Iceberg schemas |
 | `just restart` | Restart all containers |
 | `just restart-service airflow` | Restart specific service |
 | `just rebuild` | Rebuild all containers |

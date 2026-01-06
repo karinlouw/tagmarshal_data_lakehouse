@@ -67,7 +67,7 @@ just silver course_id=bradshawfarmgc ingest_date=2025-06-28
 
 ### Step 3.5: Topology Discovery (Automated)
 
-The pipeline automatically discovers course layouts (27-hole courses, shotgun start patterns) from the Silver data and updates the topology configuration.
+The pipeline automatically discovers course layouts (27-hole courses, loop courses, shotgun/random start patterns) from the Silver data and updates the topology configuration.
 
 ```bash
 just generate-topology
@@ -80,6 +80,37 @@ just seed-topology
 ```
 
 This ensures you can join `fact_telemetry_event` with `dim_facility_topology` to decode course units (e.g. Red/White/Blue nines).
+
+**One-shot refresh (recommended):**
+
+```bash
+just topology-refresh
+```
+
+**Outlier-resistant topology boundaries:**
+- Topology inference uses frequency-aware section ranges so rare GPS/geofence artifacts do not distort `section_start/section_end`.
+- Tunables:
+  - `TM_TOPOLOGY_MIN_FIXES_PER_SECTION` (default: 25)
+  - `TM_TOPOLOGY_RELIABLE_RANGE_PAD` (default: 2)
+
+### Step 3.6: Course Types Reference (Simple Dimension)
+
+We maintain a simple record of course types / volume / peak season notes for pilot/demo communication.
+
+```bash
+just seed-course-profile
+```
+
+Creates/updates:
+- `iceberg.silver.dim_course_profile` (seeded from `pipeline/silver/seeds/dim_course_profile.csv`)
+
+### Step 4.5: Seasonality (Inferred From Data)
+
+We infer seasonality directly from telemetry by counting rounds by month and weekday (based on round start time).
+
+Outputs:
+- `iceberg.gold.course_rounds_by_month` (includes `month_name`, `pct_total`)
+- `iceberg.gold.course_rounds_by_weekday` (includes `weekday_name`)
 
 ### Step 4: Gold Layer (Analytics)
 

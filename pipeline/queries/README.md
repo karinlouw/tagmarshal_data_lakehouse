@@ -36,6 +36,14 @@ Simply open and run any `.sql` file directly.
 | `null_analysis.sql` | Detailed null breakdown | Dashboard |
 | `column_completeness.sql` | Column completeness heatmap | Dashboard |
 
+### Example Queries
+
+| Query | Description |
+|-------|-------------|
+| `examples/check_loop_fatigue.sql` | Compare same-hole performance across loops (American Falls) |
+| `examples/indiancreek_shotgun_start_distribution.sql` | Validate shotgun/random starts via `start_hole` distribution (Indian Creek) |
+| `examples/demo_all_insights.sql` | Single DBeaver-friendly script: Silver + Gold insights incl. topology boundary frequency checks and seasonality |
+
 ## Adding New Queries
 
 1. Create a new `.sql` file in the appropriate subdirectory

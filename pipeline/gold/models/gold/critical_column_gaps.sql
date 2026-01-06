@@ -52,9 +52,9 @@ SELECT
     
     -- Tier 1 Impact Assessment
     CASE 
-        WHEN 100.0 * t1_null_pace / total_events > 50 THEN '🔴 CRITICAL: Pace analysis NOT possible'
-        WHEN 100.0 * t1_null_pace / total_events > 20 THEN '🟠 WARNING: Pace analysis degraded'
-        WHEN 100.0 * t1_null_pace / total_events > 5 THEN '🟡 MINOR: Some pace gaps'
+        WHEN 100.0 * GREATEST(t1_null_pace, t1_null_pace_gap) / total_events > 50 THEN '🔴 CRITICAL: Pace analysis NOT possible'
+        WHEN 100.0 * GREATEST(t1_null_pace, t1_null_pace_gap) / total_events > 20 THEN '🟠 WARNING: Pace analysis degraded'
+        WHEN 100.0 * GREATEST(t1_null_pace, t1_null_pace_gap) / total_events > 5 THEN '🟡 MINOR: Some pace gaps'
         ELSE '🟢 GOOD: Pace data complete'
     END AS pace_data_status,
     
@@ -77,8 +77,8 @@ SELECT
     
     -- Tier 3 Impact Assessment
     CASE 
-        WHEN 100.0 * t3_null_battery / total_events > 50 THEN '🟠 WARNING: Cannot monitor device health'
-        WHEN 100.0 * t3_null_battery / total_events > 20 THEN '🟡 MINOR: Some battery data missing'
+        WHEN 100.0 * (t3_null_battery + t3_null_projected) / (2 * total_events) > 50 THEN '🟠 WARNING: Cannot monitor device health'
+        WHEN 100.0 * (t3_null_battery + t3_null_projected) / (2 * total_events) > 20 THEN '🟡 MINOR: Some battery data missing'
         ELSE '🟢 GOOD: Device health trackable'
     END AS device_health_status,
     
@@ -89,29 +89,32 @@ SELECT
     
     -- Tier 4 Impact Assessment
     CASE 
-        WHEN 100.0 * t4_null_goal_time / total_events > 80 THEN '🟠 WARNING: Goal times not set'
-        WHEN 100.0 * t4_null_start_hole / total_events > 50 THEN '🟡 MINOR: Start hole unknown'
+        WHEN 100.0 * (t4_null_goal_time + t4_null_start_hole) / (2 * total_events) > 80 THEN '🟠 WARNING: Goal times not set'
+        WHEN 100.0 * (t4_null_goal_time + t4_null_start_hole) / (2 * total_events) > 50 THEN '🟡 MINOR: Start hole unknown'
         ELSE '🟢 GOOD: Round config available'
     END AS round_config_status,
     
     -- OVERALL USABILITY SCORE
     -- Weighted: Tier1=40%, Tier2=30%, Tier3=20%, Tier4=10%
     ROUND(100 - (
-        0.40 * (100.0 * (t1_null_pace + t1_null_pace_gap) / (2 * total_events)) +
+        0.40 * (100.0 * CASE 
+            WHEN (t1_null_pace + t1_null_pace_gap) > 0 THEN GREATEST(t1_null_pace, t1_null_pace_gap) 
+            ELSE 0 
+        END / total_events) +
         0.30 * (100.0 * (t2_null_hole + t2_null_timestamp) / (2 * total_events)) +
-        0.20 * (100.0 * t3_null_battery / total_events) +
-        0.10 * (100.0 * t4_null_goal_time / total_events)
+        0.20 * (100.0 * (t3_null_battery + t3_null_projected) / (2 * total_events)) +
+        0.10 * (100.0 * (t4_null_goal_time + t4_null_start_hole) / (2 * total_events))
     ), 1) AS usability_score,
     
     -- Actionable Recommendations
     CASE 
-        WHEN 100.0 * t1_null_pace / total_events > 20 
+        WHEN 100.0 * GREATEST(t1_null_pace, t1_null_pace_gap) / total_events > 20 
         THEN 'Check pace calculation algorithm - many events missing pace values'
         WHEN 100.0 * t2_null_hole / total_events > 20 
         THEN 'Review location assignment logic - many events without hole numbers'
-        WHEN 100.0 * t3_null_battery / total_events > 50 
+        WHEN 100.0 * (t3_null_battery + t3_null_projected) / (2 * total_events) > 50 
         THEN 'Enable battery reporting on devices'
-        WHEN 100.0 * t4_null_goal_time / total_events > 80 
+        WHEN 100.0 * (t4_null_goal_time + t4_null_start_hole) / (2 * total_events) > 80 
         THEN 'Configure goal times for this course in the system'
         ELSE 'Data quality acceptable - monitor for changes'
     END AS top_recommendation

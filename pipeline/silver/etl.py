@@ -147,7 +147,7 @@ def main():
                 else landing_uri
             )
             print(f"  Reading JSON: {json_path}")
-            df = spark.read.option("multiLine", True).json(json_path)
+            landing_df = spark.read.option("multiLine", True).json(json_path)
         else:
             # Read only CSV files (not JSON even if present in same directory)
             csv_path = (
@@ -156,7 +156,7 @@ def main():
                 else landing_uri
             )
             print(f"  Reading CSV: {csv_path}")
-            df = (
+            landing_df = (
                 spark.read.option("header", True)
                 .option("escape", '"')
                 .option("multiLine", False)
@@ -166,15 +166,15 @@ def main():
         print(f"  ❌ Failed to read Landing Zone data: {e}")
         raise
 
-    row_count = df.count()
+    row_count = landing_df.count()
     print(f"  Found {row_count:,} rows in Landing Zone")
 
     # For JSON with nested locations, we process differently
-    if file_format == "json" and "locations" in df.columns:
+    if file_format == "json" and "locations" in landing_df.columns:
         location_idxs = None  # Signal to use JSON path
         print(f"  Using nested JSON locations array")
     else:
-        location_idxs = discover_location_indices(df.columns)
+        location_idxs = discover_location_indices(landing_df.columns)
         if not location_idxs:
             raise ValueError(
                 "No locations[i].startTime columns found; cannot build Silver long table"
@@ -182,22 +182,11 @@ def main():
         print(f"  Found {len(location_idxs)} location indices")
 
     # Add round-level fields
-    # Handle MongoDB _id format: can be string or {"$oid": "..."}
-    if "_id" in df.columns:
-        # Check if _id is a struct (MongoDB format) or string
-        id_type = str(df.schema["_id"].dataType)
-        if "StructType" in id_type:
-            base = df.withColumn("round_id", F.col("_id.$oid"))
-        else:
-            base = df.withColumnRenamed("_id", "round_id")
-    else:
-        base = df.withColumn("round_id", F.lit(None))
-
     # Helper to safely get column (handles both CSV and JSON/MongoDB format)
     # Todo: check what this means
     def safe_col(name: str):
-        if name in df.columns:
-            col_type = str(df.schema[name].dataType)
+        if name in landing_df.columns:
+            col_type = str(landing_df.schema[name].dataType)
             if "StructType" in col_type:
                 # MongoDB format: {"$oid": "..."} or {"$date": "..."}
                 return F.coalesce(F.col(f"{name}.$oid"), F.col(f"{name}.$date"))
@@ -206,8 +195,8 @@ def main():
 
     # Handle MongoDB date format for startTime
     # Todo: Check that we normalise time and handle timezone correctly
-    if "startTime" in df.columns:
-        start_time_type = str(df.schema["startTime"].dataType)
+    if "startTime" in landing_df.columns:
+        start_time_type = str(landing_df.schema["startTime"].dataType)
         if "StructType" in start_time_type:
             # MongoDB format: {"$date": "..."}
             round_start_col = F.to_timestamp(F.col("startTime.$date"))
@@ -216,9 +205,23 @@ def main():
     else:
         round_start_col = F.lit(None)
 
-    # Todo: what is the difference between base and long_df?
-    base = (
-        base.withColumn("course_id", F.lit(args.course_id))
+    # Apply round_id logic if we haven't already (handles _id)
+    if "_id" in landing_df.columns and "round_id" not in landing_df.columns:
+        # Check if _id is a struct (MongoDB format) or string
+        id_type = str(landing_df.schema["_id"].dataType)
+        if "StructType" in id_type:
+            base_df = landing_df.withColumn("round_id", F.col("_id.$oid"))
+        else:
+            base_df = landing_df.withColumnRenamed("_id", "round_id")
+    else:
+        base_df = landing_df
+
+    # Ensure round_id exists (if it wasn't in source and we didn't map _id)
+    if "round_id" not in base_df.columns:
+        base_df = base_df.withColumn("round_id", F.lit(None))
+
+    base_df = (
+        base_df.withColumn("course_id", F.lit(args.course_id))
         .withColumn("ingest_date", F.lit(args.ingest_date))
         .withColumn("round_start_time", round_start_col)
         # Round configuration fields (critical for multi-nine and shotgun starts)
@@ -236,7 +239,9 @@ def main():
         # JSON format: explode nested locations array directly
         # posexplode returns (position, value) tuple - must select both separately
         long_df = (
-            base.select("*", F.posexplode("locations").alias("location_index", "loc"))
+            base_df.select(
+                "*", F.posexplode("locations").alias("location_index", "loc")
+            )
             .drop("locations")
             .withColumn(
                 "location",
@@ -275,33 +280,35 @@ def main():
         loc_structs = []
         for i in location_idxs:
 
-            def c(suffix: str):
+            def get_col(suffix: str):
                 name = f"locations[{i}].{suffix}"
-                return _col(name) if name in df.columns else F.lit(None)
+                return _col(name) if name in landing_df.columns else F.lit(None)
 
             loc_structs.append(
                 F.struct(
                     F.lit(i).alias("location_index"),
-                    c("hole").cast("int").alias("hole_number"),
-                    c("sectionNumber").cast("int").alias("section_number"),
-                    c("holeSection").cast("int").alias("hole_section"),
-                    c("startTime").cast("double").alias("start_offset_seconds"),
-                    c("date").alias("fix_time_iso"),
-                    c("fixCoordinates[0]").cast("double").alias("longitude"),
-                    c("fixCoordinates[1]").cast("double").alias("latitude"),
-                    c("isProjected").cast("boolean").alias("is_projected"),
-                    c("isProblem").cast("boolean").alias("is_problem"),
-                    c("isCache").cast("boolean").alias("is_cache"),
-                    F.round(c("paceGap").cast("double"), 3).alias("pace_gap"),
-                    F.round(c("positionalGap").cast("double"), 3).alias(
+                    get_col("hole").cast("int").alias("hole_number"),
+                    get_col("sectionNumber").cast("int").alias("section_number"),
+                    get_col("holeSection").cast("int").alias("hole_section"),
+                    get_col("startTime").cast("double").alias("start_offset_seconds"),
+                    get_col("date").alias("fix_time_iso"),
+                    get_col("fixCoordinates[0]").cast("double").alias("longitude"),
+                    get_col("fixCoordinates[1]").cast("double").alias("latitude"),
+                    get_col("isProjected").cast("boolean").alias("is_projected"),
+                    get_col("isProblem").cast("boolean").alias("is_problem"),
+                    get_col("isCache").cast("boolean").alias("is_cache"),
+                    F.round(get_col("paceGap").cast("double"), 3).alias("pace_gap"),
+                    F.round(get_col("positionalGap").cast("double"), 3).alias(
                         "positional_gap"
                     ),
-                    F.round(c("pace").cast("double"), 3).alias("pace"),
-                    c("batteryPercentage").cast("double").alias("battery_percentage"),
+                    F.round(get_col("pace").cast("double"), 3).alias("pace"),
+                    get_col("batteryPercentage")
+                    .cast("double")
+                    .alias("battery_percentage"),
                 )
             )
 
-        long_df = base.withColumn("location", F.explode(F.array(*loc_structs)))
+        long_df = base_df.withColumn("location", F.explode(F.array(*loc_structs)))
 
     # Todo: we need to investigate this more, it seems like we are losing data here.
 
@@ -322,7 +329,7 @@ def main():
     )
 
     # Initial selection and transformation
-    out = long_df.select(
+    telemetry_df = long_df.select(
         "round_id",
         "course_id",
         "ingest_date",
@@ -366,9 +373,7 @@ def main():
             .withColumn("section_start", F.col("section_start").cast("int"))
             .withColumn("section_end", F.col("section_end").cast("int"))
             .withColumn("nine_number_topo", F.col("nine_number").cast("int"))
-            .withColumn("unit_id", F.col("unit_id").cast("int"))
-            # Drop original string nine_number to avoid confusion
-            .drop("nine_number")
+            .select("facility_id", "section_start", "section_end", "nine_number_topo")
         )
 
         # Broadcast the topology table as it's small
@@ -376,7 +381,7 @@ def main():
 
         # Perform join
         # We use a left join to preserve telemetry rows even if topology is missing
-        out = out.join(
+        telemetry_df = telemetry_df.join(
             topology_df,
             (F.col("course_id") == F.col("facility_id"))
             & (F.col("section_number") >= F.col("section_start"))
@@ -384,32 +389,37 @@ def main():
             "left",
         ).drop("facility_id", "section_start", "section_end")
 
-        # Rename the topo column to the expected schema column
-        out = out.withColumnRenamed("nine_number_topo", "nine_number")
-
-        # Handle cases where no topology match was found (missing from CSV)
-        # Fallback to the heuristic for backward compatibility if needed
-        out = out.withColumn(
+        # Handle cases where no topology match was found (missing from CSV) or where
+        # the source data explicitly provides 'current_nine' (overriding inference).
+        # Priority:
+        # 1. 'current_nine' from source (if available and trusted)
+        # 2. 'nine_number_topo' from topology join
+        # 3. Fallback heuristic
+        telemetry_df = telemetry_df.withColumn(
             "nine_number",
             F.coalesce(
-                F.col("nine_number"),
+                F.col("current_nine"),
+                F.col("nine_number_topo"),
+                F.when(F.col("section_number") <= 27, 1)
+                .when(F.col("section_number") <= 54, 2)
+                .otherwise(3),
+            ),
+        ).drop("nine_number_topo")
+    else:
+        print(f"  ⚠ Topology seed not found at {seed_path}, using fallback logic")
+        telemetry_df = telemetry_df.withColumn(
+            "nine_number",
+            F.coalesce(
+                F.col("current_nine"),
                 F.when(F.col("section_number") <= 27, 1)
                 .when(F.col("section_number") <= 54, 2)
                 .otherwise(3),
             ),
         )
-    else:
-        print(f"  ⚠ Topology seed not found at {seed_path}, using fallback logic")
-        out = out.withColumn(
-            "nine_number",
-            F.when(F.col("section_number") <= 27, 1)
-            .when(F.col("section_number") <= 54, 2)
-            .otherwise(3),
-        )
 
     # Continue with remaining transformations
-    out = (
-        out.withColumn(
+    telemetry_df = (
+        telemetry_df.withColumn(
             "geometry_wkt",
             F.when(
                 F.col("longitude").isNotNull() & F.col("latitude").isNotNull(),
@@ -426,27 +436,21 @@ def main():
         .withColumn("is_timestamp_missing", F.col("fix_timestamp").isNull())
     )
 
-    # NOTE: Previously we dropped rows with NULL fix_timestamp here.
-    # For exploration/audit phase, we keep all rows and use is_timestamp_missing flag instead.
-    # This allows analysis of null patterns and data quality issues.
-    # To filter out NULL timestamps in queries, use: WHERE is_timestamp_missing = false
-    # out = out.filter(F.col("fix_timestamp").isNotNull())  # COMMENTED OUT - keeping nulls for audit
-
-    # Todo: Check that we deduplicate correctly here. How does it work?
-
     # Dedup: prefer is_cache=true for same (round_id, fix_timestamp)
-    w = Window.partitionBy("round_id", "fix_timestamp").orderBy(
+    # This partitions data by round and time, then orders by is_cache desc (True first).
+    # We take the first row, so we prefer the cached version if duplicates exist.
+    window_spec = Window.partitionBy("round_id", "fix_timestamp").orderBy(
         F.col("is_cache").desc_nulls_last()
     )
-    out = (
-        out.withColumn("_rn", F.row_number().over(w))
-        .filter(F.col("_rn") == 1)
-        .drop("_rn")
+    telemetry_df = (
+        telemetry_df.withColumn("row_num", F.row_number().over(window_spec))
+        .filter(F.col("row_num") == 1)
+        .drop("row_num")
     )
 
     # Split valid vs invalid coordinates (quarantine bad rows)
     # Todo: What is defined of invalid coordinates?
-    invalid = out.filter(
+    invalid = telemetry_df.filter(
         (
             F.col("longitude").isNotNull()
             & ((F.col("longitude") < -180) | (F.col("longitude") > 180))
@@ -456,10 +460,12 @@ def main():
             & ((F.col("latitude") < -90) | (F.col("latitude") > 90))
         )
     )
-    valid = out.subtract(invalid)
+    valid = telemetry_df.subtract(invalid)
 
     # Todo: Updage deprecated datetime
-    run_id = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    from datetime import timezone
+
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
     # Write quarantined rows
     invalid_count = invalid.count()
@@ -485,7 +491,6 @@ def main():
     if table_exists:
         # APPEND mode for incremental ingestion (required for 650 courses x 7 years!)
         # First delete existing data for this course/ingest_date to ensure idempotency
-        # Todo: How do we ensure idempotency when backfilling?
         spark.sql(
             f"""
             DELETE FROM {table} 
@@ -502,7 +507,6 @@ def main():
         print(f"  → Appended {valid_count:,} rows")
     else:
         # Create table with partitioning on first run
-        # Todo: Need more info here
         valid.writeTo(table).using("iceberg").partitionedBy(
             "course_id", "event_date"
         ).create()
@@ -511,7 +515,6 @@ def main():
     print(f"  ✅ DONE: {valid_count:,} rows → {table}")
 
     # Write run summary
-    # Todo: Should we add something about the min and max date to a file? Or another way to check
     summary_path = f"s3a://{bucket_observability}/silver/course_id={args.course_id}/ingest_date={args.ingest_date}/run_id={run_id}"
     summary = spark.createDataFrame(
         [
@@ -526,7 +529,6 @@ def main():
             }
         ]
     )
-    # Todo: What is this overwrite mode? Can we make it a variable or argument?
     summary.coalesce(1).write.mode("overwrite").json(summary_path)
     print(f"  → Summary: {summary_path}")
     print(f"{'='*60}\n")

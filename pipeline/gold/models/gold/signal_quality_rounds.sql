@@ -6,7 +6,7 @@ with base as (
     sum(case when is_projected then 1 else 0 end) as projected_fix_count,
     sum(case when is_problem then 1 else 0 end) as problem_fix_count
   from {{ source('silver', 'fact_telemetry_event') }}
-  group by 1, 2
+  group by course_id, round_id
 )
 select
   course_id,

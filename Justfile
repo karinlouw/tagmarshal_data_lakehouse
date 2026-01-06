@@ -850,12 +850,18 @@ silver course_id ingest_date="":
   echo "  🔗 Monitor: http://localhost:8080/dags/silver_etl"
   echo ""
 
+  # Auto-generate topology (ensure new courses are captured immediately)
+  just generate-topology
+  # Upload and seed topology table
+  just seed-topology
+
 # Process ALL courses through Silver ETL
 # Mode (sequential/parallel) is controlled by TM_PIPELINE_MODE in config/local.env
 silver-all ingest_date="":
   #!/usr/bin/env bash
   set -euo pipefail
-  INGEST_DATE="${1:-$(date +%Y-%m-%d)}"
+  INGEST_DATE="{{ingest_date}}"
+  [ -z "$INGEST_DATE" ] && INGEST_DATE=$(date +%Y-%m-%d)
   
   # Read pipeline mode from config (default: sequential for local dev)
   PIPELINE_MODE=$(grep "^TM_PIPELINE_MODE=" config/local.env 2>/dev/null | cut -d= -f2 || echo "sequential")
@@ -1051,8 +1057,8 @@ generate-topology:
   
   # Run generator in Spark container and capture output to tmp file
   echo "  ⏳ Analyzing Silver data..."
-  docker exec spark python3 /opt/tagmarshal/pipeline/scripts/generate_topology.py --output /tmp/topology.csv
-  
+  docker exec spark python3 /opt/tagmarshal/pipeline/scripts/generate_topology.py --output /tmp/topology.csv 2>&1 | grep -v "NativeCodeLoader\|SLF4J\|MetricsConfig" || true
+
   # Copy result back to host
   echo "  📥 Updating local topology file..."
   docker cp spark:/tmp/topology.csv pipeline/silver/seeds/dim_facility_topology.csv
@@ -1061,6 +1067,13 @@ generate-topology:
   echo "  ✅ Topology updated: pipeline/silver/seeds/dim_facility_topology.csv"
   echo "  💡 You can now edit this file to rename units (e.g. 'Unit 1' → 'Red Course')"
   echo ""
+
+# One-shot helper: regenerate + seed topology
+topology-refresh:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  just generate-topology
+  just seed-topology
 
 # Seed the topology data into an Iceberg table (for Trino/DBeaver visibility)
 seed-topology:
@@ -1083,6 +1096,29 @@ seed-topology:
   echo ""
   echo "  ✅ Seeding complete"
   echo "  📍 Query: SELECT * FROM iceberg.silver.dim_facility_topology"
+  echo ""
+
+# Seed the course profile (simple record of course types / notes)
+seed-course-profile:
+  #!/usr/bin/env bash
+  set -euo pipefail
+
+  echo ""
+  echo "🗂️  SEEDING COURSE PROFILE"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+
+  # 1. Upload CSV to MinIO
+  echo "  📤 Uploading CSV to MinIO..."
+  cat pipeline/silver/seeds/dim_course_profile.csv | docker exec -i minio mc pipe myminio/tm-lakehouse-source-store/seeds/dim_course_profile.csv > /dev/null
+
+  # 2. Run Spark job to load it into Iceberg (MERGE / upsert)
+  echo "  ❄️  Loading into Iceberg table (iceberg.silver.dim_course_profile)..."
+  docker exec spark python3 /opt/tagmarshal/pipeline/scripts/seed_course_profile.py
+
+  echo ""
+  echo "  ✅ Seeding complete"
+  echo "  📍 Query: SELECT * FROM iceberg.silver.dim_course_profile"
   echo ""
 
 

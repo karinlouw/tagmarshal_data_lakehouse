@@ -9,7 +9,7 @@ with base as (
     avg(pace_gap) as avg_pace_gap,
     avg(positional_gap) as avg_positional_gap
   from {{ source('silver', 'fact_telemetry_event') }}
-  group by 1, 2
+  group by course_id, round_id
 )
 select
   course_id,

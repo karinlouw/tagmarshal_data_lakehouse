@@ -59,3 +59,13 @@ Airflow DAG and immediately returns - it doesn't wait for the actual Spark job t
 - proper error handling
 
 - standardize time
+
+5 January!
+
+We need to make sure the topoloigy table is generating correctly
+
+How can we flag seasonality?
+
+Can we start keeping record of the different types of courses? Just a simple table in our database somewhere. SOmewhere where it'll make sense. Like how can we flag seasonality?
+
+We need to raise errors properly

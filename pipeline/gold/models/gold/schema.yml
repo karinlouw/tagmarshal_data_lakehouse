@@ -56,5 +56,54 @@ models:
     columns:
       - name: course_id
         tests: [not_null, unique]
+
+  - name: fact_round_hole_performance
+    description: >
+      The most critical analytical table. Granular performance metrics
+      aggregated at the hole level (Round + Hole).
+      Enriched with topology data (Unit Name) to differentiate loops.
+    columns:
+      - name: course_id
+        tests: [not_null]
+      - name: round_id
+        tests: [not_null]
+      - name: hole_number
+        tests: [not_null]
+      - name: nine_number
+        description: "1 = First 9 holes played, 2 = Second 9 holes played"
+        tests: [not_null]
+      - name: course_unit
+        description: "Physical unit name (e.g. Red Course, Back Nine)"
+      - name: avg_pace_sec
+        description: "Average seconds relative to goal (positive = slow)"
+      - name: avg_pace_gap_sec
+        description: "Average spacing to group ahead (seconds)"
       - name: usability_score
         description: "Weighted score based on data completeness in critical columns"
+
+  - name: course_rounds_by_month
+    description: >
+      Seasonality view: rounds per course per calendar month (based on round start time).
+      Includes human-friendly month name for dashboard/demo use and percentage of total rounds.
+    columns:
+      - name: course_id
+        tests: [not_null]
+      - name: month_start
+        tests: [not_null]
+      - name: month_number
+      - name: month_name
+      - name: rounds
+      - name: pct_total
+        description: "Share of the course’s total rounds that occurred in this month (0–100)."
+
+  - name: course_rounds_by_weekday
+    description: >
+      Seasonality view: rounds per course by weekday (based on round start time).
+      Includes human-friendly weekday name for dashboard/demo use.
+    columns:
+      - name: course_id
+        tests: [not_null]
+      - name: weekday_number
+        tests: [not_null]
+      - name: weekday_name
+      - name: rounds
