@@ -3,7 +3,8 @@ with base as (
     course_id,
     round_id,
     fix_timestamp,
-    battery_percentage
+    battery_percentage,
+    is_location_padding
   from {{ source('silver', 'fact_telemetry_event') }}
 )
 select
@@ -18,6 +19,9 @@ select
     else null
   end as health_flag
 from base
-where battery_percentage is not null and battery_percentage < 20
+where
+  is_location_padding = false
+  and battery_percentage is not null
+  and battery_percentage < 20
 
 

@@ -1,5 +1,6 @@
 import os
 from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType
 
 
@@ -29,6 +30,8 @@ def main():
     os.environ["AWS_SECRET_ACCESS_KEY"] = os.environ.get(
         "TM_S3_SECRET_KEY", "minioadmin"
     )
+    # Also pass region via Spark config so the JVM-side AWS SDK can resolve it reliably
+    region = os.environ.get("TM_S3_REGION", os.environ.get("AWS_REGION", "us-east-1"))
 
     spark = (
         SparkSession.builder.appName("SeedTopology")
@@ -60,6 +63,7 @@ def main():
             os.environ.get("TM_S3_SECRET_KEY", "minioadmin"),
         )
         .config("spark.sql.catalog.iceberg.s3.path-style-access", "true")
+        .config("spark.sql.catalog.iceberg.s3.region", region)
         # Hadoop S3A configuration for reading CSV directly via s3a://
         .config(
             "spark.hadoop.fs.s3a.endpoint",
@@ -105,12 +109,70 @@ def main():
         count = df.count()
         print(f"Read {count} rows from {csv_path}")
 
-        # Write to Iceberg table (overwrite to keep it fresh)
-        # We use the namespace 'silver' which maps to tm-lakehouse-source-store/warehouse/silver
         target_table = "iceberg.silver.dim_facility_topology"
+        # Create table if missing, then MERGE (idempotent; avoids createOrReplace locking behavior)
+        spark.sql(
+            """
+            CREATE TABLE IF NOT EXISTS iceberg.silver.dim_facility_topology (
+              facility_id STRING,
+              unit_id INT,
+              unit_name STRING,
+              nine_number INT,
+              section_start INT,
+              section_end INT,
+              created_at TIMESTAMP,
+              updated_at TIMESTAMP
+            )
+            USING iceberg
+            """
+        )
 
-        df.writeTo(target_table).createOrReplace()
-        print(f"✅ Successfully wrote to {target_table}")
+        # Normalize empty strings to NULLs
+        df = df.withColumn(
+            "unit_name", F.when(F.col("unit_name") == "", F.lit(None)).otherwise(F.col("unit_name"))
+        )
+
+        staged = df.withColumn("created_at", F.current_timestamp()).withColumn(
+            "updated_at", F.current_timestamp()
+        )
+        staged.createOrReplaceTempView("topology_incoming")
+
+        spark.sql(
+            """
+            MERGE INTO iceberg.silver.dim_facility_topology t
+            USING topology_incoming s
+            ON t.facility_id = s.facility_id
+               AND t.unit_id = s.unit_id
+               AND t.nine_number = s.nine_number
+               AND t.section_start = s.section_start
+               AND t.section_end = s.section_end
+            WHEN MATCHED THEN UPDATE SET
+              unit_name = s.unit_name,
+              updated_at = s.updated_at
+            WHEN NOT MATCHED THEN INSERT (
+              facility_id,
+              unit_id,
+              unit_name,
+              nine_number,
+              section_start,
+              section_end,
+              created_at,
+              updated_at
+            ) VALUES (
+              s.facility_id,
+              s.unit_id,
+              s.unit_name,
+              s.nine_number,
+              s.section_start,
+              s.section_end,
+              s.created_at,
+              s.updated_at
+            )
+            """
+        )
+
+        final_count = spark.table(target_table).count()
+        print(f"✅ dim_facility_topology ready: {final_count} rows in {target_table}")
 
     except Exception as e:
         print(f"❌ Error seeding table: {e}")

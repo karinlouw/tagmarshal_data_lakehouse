@@ -20,13 +20,27 @@ One row per GPS fix (location reading) from a device during a round of golf.
 
 | Column | Type | Description | Example |
 |--------|------|-------------|---------|
+| `round_start_time` | TIMESTAMP | When the round started | `2025-06-28 14:00:00` |
+| `round_end_time` | TIMESTAMP | When the round ended | `2025-06-28 18:30:00` |
 | `start_hole` | INTEGER | Which hole the round started on (1-18, or any for shotgun) | `1` (normal), `10` (back 9), `5` (shotgun) |
 | `start_section` | INTEGER | Cumulative section number where round started | `4` |
 | `end_section` | INTEGER | Cumulative section number where round ended | `57` |
 | `is_nine_hole` | BOOLEAN | Whether this is a 9-hole round (vs 18-hole) | `true` = 9-hole round |
 | `current_nine` | INTEGER | Which 9 the device is currently on | `1` = front 9, `2` = back 9, `3` = third 9 (27-hole) |
 | `goal_time` | INTEGER | Target time for the round in seconds (set by course, often unrealistic) | `15840` = 4 hours 24 minutes |
+| `goal_name` | STRING | Goal name (e.g., "Default") | `Default` |
+| `goal_time_fraction` | DOUBLE | Fractional goal time | `1.0` |
 | `is_complete` | BOOLEAN | Whether the round was completed (≥75% sections visited) | `true` = finished round |
+| `is_incomplete` | BOOLEAN | Incomplete round flag (alternative to `is_complete`) | `false` = complete round |
+| `is_secondary` | BOOLEAN | Secondary round flag | `false` = primary round |
+| `is_auto_assigned` | BOOLEAN | Auto-assigned flag | `false` = manually assigned |
+| `last_section_start` | DOUBLE | Last section start time (seconds) | `9024.836` |
+| `current_section` | INTEGER | Current section number (round-level) | `24` |
+| `current_hole` | INTEGER | Current hole number (round-level) | `9` |
+| `current_hole_section` | INTEGER | Current hole section (round-level) | `3` |
+| `device` | STRING | Tracker device ID | `67dd865a6ba0208f3c67971e` |
+| `first_fix` | STRING | First fix identifier | `683ba269c5a528c20d58400e` |
+| `last_fix` | STRING | Last fix identifier | `683bc4f6c5a528c20d586477` |
 
 ---
 
@@ -35,6 +49,7 @@ One row per GPS fix (location reading) from a device during a round of golf.
 | Column | Type | Description | Example |
 |--------|------|-------------|---------|
 | `location_index` | INTEGER | Position in the round's location array (0-based) | `0` = first fix, `52` = 53rd fix |
+| `is_location_padding` | BOOLEAN | True for CSV “padding” slots (no real fix in this array position) | `true` = padding row |
 | `hole_number` | INTEGER | Which hole the device is on (1-18 or 1-27) | `7` |
 | `section_number` | INTEGER | Cumulative section across entire course (1-57 for 18 holes) | `21` = hole 7, section 1 |
 | `hole_section` | INTEGER | Section within the current hole (resets per hole) | `1` = tee, `2` = fairway, `3` = green |
@@ -51,6 +66,8 @@ One row per GPS fix (location reading) from a device during a round of golf.
 | `latitude` | DOUBLE | GPS latitude coordinate | `34.15306` |
 | `longitude` | DOUBLE | GPS longitude coordinate | `-84.44809` |
 | `geometry_wkt` | VARCHAR | Well-Known Text representation of the point | `POINT(-84.448 34.153)` |
+
+**Note:** All timing and GPS fields can be NULL. The `is_timestamp_missing` flag tracks when `fix_timestamp` is NULL, but the row is still preserved.
 
 ---
 
@@ -87,19 +104,22 @@ One row per GPS fix (location reading) from a device during a round of golf.
 
 | Column | Type | Description | Example |
 |--------|------|-------------|---------|
+| `device` | STRING | Tracker device ID | `67dd865a6ba0208f3c67971e` |
+| `battery_percentage` | DOUBLE | Device battery level (0-100) | `85.0` = 85% battery |
 | `is_cache` | BOOLEAN | Fix was stored offline and uploaded later | `true` = device was offline |
 | `is_projected` | BOOLEAN | Location was projected (estimated), not measured | `true` = estimated position |
 | `is_problem` | BOOLEAN | Group meets course-defined problem criteria | `true` = flagged as problem |
 | `is_timestamp_missing` | BOOLEAN | Fix had no valid timestamp in source data | `true` = timestamp was NULL/empty |
-| `battery_percentage` | DOUBLE | Device battery level (0-100) | `85.0` = 85% battery |
 
 ### Data Quality Flags
 
-**`is_timestamp_missing`** (New for Audit Phase)
+**`is_timestamp_missing`**
 - Tracks records where the original timestamp was NULL or empty
 - Allows us to analyse data completeness without losing records
 - Use to filter when timestamp is required for analysis
 - Example: `WHERE is_timestamp_missing = false` for time-series analysis
+
+**Important:** All fields in this table can be NULL. No data is filtered based on NULL values - all rows from the original data are preserved.
 
 ---
 
@@ -151,4 +171,54 @@ Not all columns have data for all courses:
 > "You're all slow, but that's one person's fault - can't go faster than group ahead"
 
 **Bottom line:** Use `pace_gap` and `positional_gap` for bottleneck analysis, not `pace` alone.
+
+---
+
+## Complete Field List
+
+All fields in `fact_telemetry_event` (organized by category):
+
+### Round Identification (3 fields)
+- `round_id`, `course_id`, `ingest_date`
+
+### Round Timestamps (2 fields)
+- `round_start_time`, `round_end_time`
+
+### Round Configuration (15 fields)
+- `start_hole`, `start_section`, `end_section`
+- `is_nine_hole`, `current_nine`
+- `goal_time`, `goal_name`, `goal_time_fraction`
+- `is_complete`, `is_incomplete`, `is_secondary`, `is_auto_assigned`
+- `last_section_start`
+- `current_section`, `current_hole`, `current_hole_section`
+- `device`, `first_fix`, `last_fix`
+
+### Location Within Round (5 fields)
+- `location_index`, `hole_number`, `section_number`, `hole_section`, `nine_number`
+
+### GPS & Timing (5 fields)
+- `fix_timestamp`, `event_date`, `latitude`, `longitude`, `geometry_wkt`
+
+### Pace Metrics (3 fields)
+- `pace`, `pace_gap`, `positional_gap`
+
+### Device & Status (5 fields)
+- `battery_percentage`, `is_cache`, `is_projected`, `is_problem`, `is_timestamp_missing`
+
+**Total: 38 fields** - All preserved from original data, no fields lost.
+
+---
+
+## Data Preservation Guarantee
+
+✅ **All original data is preserved:**
+- All fields from source data are captured
+- All NULL values are preserved (no filtering)
+- All rows are preserved (even if key fields are NULL)
+- Invalid coordinates are quarantined (not lost, moved to quarantine bucket)
+
+✅ **No data loss:**
+- Bronze layer: Files uploaded exactly as received
+- Silver layer: All rows and columns preserved
+- Only deduplication occurs (prefers `is_cache=true` for same `round_id` + `fix_timestamp`)
 

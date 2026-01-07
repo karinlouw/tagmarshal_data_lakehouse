@@ -76,6 +76,52 @@ Course setup and configuration patterns.
 | `has_shotgun` | BOOLEAN | Shotgun starts detected |
 | `pct_nine_hole` | DOUBLE | % of 9-hole rounds |
 
+### `gold.telemetry_completeness_summary`
+
+Per-course completeness summary of the Silver telemetry table. Helps explain how
+many rows are CSV padding slots and how often timestamps are missing.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `course_id` | STRING | Course identifier |
+| `total_rows` | INTEGER | Total Silver rows for this course (including padding) |
+| `padding_rows` | INTEGER | Rows where `is_location_padding = TRUE` (CSV padding) |
+| `non_padding_rows` | INTEGER | Rows where `is_location_padding = FALSE` (real fixes) |
+| `ts_missing_rows` | INTEGER | Rows where `is_timestamp_missing = TRUE` (incl. padding) |
+| `ts_missing_non_padding_rows` | INTEGER | Missing timestamps on non-padding rows only |
+| `pct_padding_total` | DOUBLE | % of total_rows that are padding_rows |
+| `pct_ts_missing_total` | DOUBLE | % of total_rows with missing timestamps |
+| `pct_ts_missing_non_padding` | DOUBLE | % of non_padding_rows with missing timestamps |
+
+### `gold.gold_coverage_audit`
+
+Per-course audit table comparing Silver telemetry counts against key Gold models.
+This is built to make any unintentional filtering obvious (especially around
+padding rows and missing timestamps).
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `course_id` | STRING | Course identifier |
+| `silver_total_rows` | INTEGER | Total Silver rows (including padding) |
+| `silver_padding_rows` | INTEGER | Silver rows where `is_location_padding = TRUE` |
+| `silver_non_padding_rows` | INTEGER | Silver rows where `is_location_padding = FALSE` |
+| `silver_ts_missing_rows` | INTEGER | Silver rows where `is_timestamp_missing = TRUE` |
+| `silver_ts_missing_non_padding_rows` | INTEGER | Missing timestamps on non-padding rows |
+| `silver_distinct_rounds_all` | INTEGER | Distinct round_ids across all Silver rows |
+| `silver_distinct_rounds_non_padding` | INTEGER | Distinct round_ids on non-padding rows only |
+| `gold_fact_rounds_rows` | INTEGER | Rows in `gold.fact_rounds` |
+| `gold_fact_rounds_distinct_rounds` | INTEGER | Distinct round_ids in `gold.fact_rounds` |
+| `gold_fact_rounds_sum_fix_count` | INTEGER | Sum of `fix_count` in `gold.fact_rounds` |
+| `gold_hole_perf_rows` | INTEGER | Rows in `gold.fact_round_hole_performance` |
+| `gold_hole_perf_distinct_rounds` | INTEGER | Distinct round_ids in hole performance |
+| `gold_hole_perf_distinct_round_hole_nine` | INTEGER | Distinct (round_id, hole_number, nine_number) |
+| `gold_rounds_by_month_sum_rounds` | INTEGER | Total rounds summed across month buckets |
+| `gold_rounds_by_month_unknown_ts_rounds` | INTEGER | Rounds in the “Unknown timestamp” month bucket |
+| `gold_rounds_by_weekday_sum_rounds` | INTEGER | Total rounds summed across weekday buckets |
+| `gold_rounds_by_weekday_unknown_ts_rounds` | INTEGER | Rounds in the “Unknown timestamp” weekday bucket |
+| `gold_dim_course_present` | INTEGER | 1 if course exists in `gold.dim_course` |
+| `unit_count` | INTEGER | Count of topology units (if available) |
+
 ## Build Command
 
 ```bash

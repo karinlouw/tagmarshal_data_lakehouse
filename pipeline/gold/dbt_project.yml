@@ -20,5 +20,10 @@ models:
     gold:
       +materialized: table
       +schema: gold
+    silver_normalized:
+      # Normalized exploration tables/views built FROM Silver, written back TO Silver.
+      # These are for understanding/query ergonomics, not analytics aggregations.
+      +schema: silver
+      +materialized: table
 
 

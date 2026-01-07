@@ -33,6 +33,8 @@ def main():
     os.environ["AWS_SECRET_ACCESS_KEY"] = os.environ.get(
         "TM_S3_SECRET_KEY", "minioadmin"
     )
+    # Also pass region via Spark config so the JVM-side AWS SDK can resolve it reliably
+    region = os.environ.get("TM_S3_REGION", os.environ.get("AWS_REGION", "us-east-1"))
 
     spark = (
         SparkSession.builder.appName("SeedCourseProfile")
@@ -64,6 +66,7 @@ def main():
             os.environ.get("TM_S3_SECRET_KEY", "minioadmin"),
         )
         .config("spark.sql.catalog.iceberg.s3.path-style-access", "true")
+        .config("spark.sql.catalog.iceberg.s3.region", region)
         # Hadoop S3A configuration for reading CSV via s3a://
         .config(
             "spark.hadoop.fs.s3a.endpoint",

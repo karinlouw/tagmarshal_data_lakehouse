@@ -9,22 +9,41 @@ WITH round_starts AS (
         round_id,
         MIN(fix_timestamp) AS round_start_time
     FROM {{ source('silver', 'fact_telemetry_event') }}
-    WHERE fix_timestamp IS NOT NULL
+    WHERE is_location_padding = FALSE
     GROUP BY course_id, round_id
+),
+rounds_with_month_keys AS (
+    SELECT
+        course_id,
+        round_id,
+        -- If a round has no timestamps at all, keep it and bucket it explicitly.
+        CASE
+            WHEN round_start_time IS NULL THEN DATE '1900-01-01'
+            ELSE DATE_TRUNC('month', round_start_time)
+        END AS month_start,
+        CASE
+            WHEN round_start_time IS NULL THEN 0
+            ELSE EXTRACT(MONTH FROM round_start_time)
+        END AS month_number,
+        CASE
+            WHEN round_start_time IS NULL THEN 'Unknown (missing timestamp)'
+            ELSE FORMAT_DATETIME(round_start_time, 'MMMM')
+        END AS month_name
+    FROM round_starts
 ),
 monthly_rounds AS (
     SELECT
         course_id,
-        DATE_TRUNC('month', round_start_time) AS month_start,
-        EXTRACT(MONTH FROM round_start_time) AS month_number,
-        FORMAT_DATETIME(round_start_time, 'MMMM') AS month_name,
+        month_start,
+        month_number,
+        month_name,
         COUNT(DISTINCT round_id) AS rounds
-    FROM round_starts
+    FROM rounds_with_month_keys
     GROUP BY
         course_id,
-        DATE_TRUNC('month', round_start_time),
-        EXTRACT(MONTH FROM round_start_time),
-        FORMAT_DATETIME(round_start_time, 'MMMM')
+        month_start,
+        month_number,
+        month_name
 ),
 total_rounds_per_course AS (
     SELECT

@@ -11,6 +11,7 @@ import plotly.graph_objects as go
 
 from utils.database import execute_query
 from utils import queries
+from utils.dbt_provenance import render_dbt_models_section
 from utils.colors import (
     COLOR_SCALE_QUALITY,
     COLOR_GOOD,
@@ -51,10 +52,13 @@ def render():
             st.metric(
                 label="Total telemetry events",
                 value=f"{exec_df['total_events'].iloc[0]:,}",
+                help="Excludes padding rows (real GPS fixes only)",
             )
 
-        with st.expander("SQL query"):
-            st.code(queries.EXECUTIVE_SUMMARY, language="sql")
+        st.caption(
+            "Courses + rounds are counted from `iceberg.gold.fact_rounds`; "
+            "telemetry events are counted from `iceberg.silver.fact_telemetry_event` (non-padding)."
+        )
 
     except Exception as e:
         st.error(f"Failed to load ingestion summary: {e}")
@@ -68,7 +72,21 @@ def render():
     st.markdown("Data completeness percentage by course and column.")
 
     try:
-        comp_df = execute_query(queries.COLUMN_COMPLETENESS)
+        # Add toggle for including/excluding padding
+        include_padding = st.radio(
+            "Include padding data:",
+            ["Exclude padding (recommended)", "Include padding"],
+            horizontal=True,
+            index=0,
+            key="completeness_padding_toggle",
+        )
+
+        use_padding = include_padding == "Include padding"
+
+        if use_padding:
+            comp_df = execute_query(queries.COLUMN_COMPLETENESS)
+        else:
+            comp_df = execute_query(queries.COLUMN_COMPLETENESS_NON_PADDING)
 
         # Prepare data for heatmap
         heatmap_cols = [
@@ -114,84 +132,22 @@ def render():
         st.plotly_chart(fig, use_container_width=True)
 
         # Create table with missing data (count and percentage)
-        with st.expander("Completeness table", expanded=False):
-            # Convert completeness percentages to numeric
-            comp_display_df = comp_df.copy()
-            for col in heatmap_cols:
-                comp_display_df[col] = pd.to_numeric(
-                    comp_display_df[col], errors="coerce"
-                )
-
-            comp_display_df["total"] = pd.to_numeric(
-                comp_display_df["total"], errors="coerce"
-            )
-
-            # Build table data with count and percentage missing for each column
-            table_data = []
-            for _, row in comp_display_df.iterrows():
-                course_row = {"course_id": row["course_id"]}
-                total = row["total"]
-
-                # For each column, calculate missing count and percentage
-                for col_pct, col_label in zip(heatmap_cols, col_labels):
-                    completeness_pct = row[col_pct]
-                    missing_pct = (
-                        100.0 - completeness_pct
-                        if pd.notna(completeness_pct)
-                        else 100.0
-                    )
-                    missing_count = (
-                        int((missing_pct / 100.0) * total)
-                        if pd.notna(missing_pct) and pd.notna(total)
-                        else 0
-                    )
-
-                    # Add count and percentage columns
-                    col_key = col_label.lower().replace(" ", "_")
-                    course_row[f"{col_key}_count"] = missing_count
-                    course_row[f"{col_key}_pct"] = missing_pct
-
-                table_data.append(course_row)
-
-            table_df = pd.DataFrame(table_data)
-
-            # Build display columns: course_id, then count/pct pairs for each column
-            display_cols = ["course_id"]
-            format_dict = {}
-
-            for col_label in col_labels:
-                col_key = col_label.lower().replace(" ", "_")
-                count_col = f"{col_key}_count"
-                pct_col = f"{col_key}_pct"
-
-                if count_col in table_df.columns and pct_col in table_df.columns:
-                    display_cols.extend([count_col, pct_col])
-                    format_dict[count_col] = "{:,}"
-                    format_dict[pct_col] = "{:.3f}%"
-
-            # Create readable column names
-            rename_dict = {"course_id": "Course"}
-            for col in display_cols[1:]:  # Skip course_id
-                if col.endswith("_count"):
-                    base_name = col.replace("_count", "").replace("_", " ").title()
-                    rename_dict[col] = f"{base_name} (count)"
-                elif col.endswith("_pct"):
-                    base_name = col.replace("_pct", "").replace("_", " ").title()
-                    rename_dict[col] = f"{base_name} (%)"
-
-            table_display = table_df[display_cols].rename(columns=rename_dict)
-
-            st.dataframe(
-                table_display.style.format(format_dict),
-                use_container_width=True,
-            )
-
+        st.subheader("Completeness table")
+        try:
+            missing_table_df = execute_query(queries.COLUMN_COMPLETENESS_MISSING_TABLE)
+            st.dataframe(missing_table_df, use_container_width=True, hide_index=True)
             st.caption(
-                "Note: Missing data is calculated based on null values in the source data."
+                "Note: this table is computed over **non-padding telemetry events** only "
+                "(`is_location_padding = FALSE`). For round-level config fields like `start_hole`, "
+                "missingness can look high because if a round is missing `start_hole`, it is NULL on "
+                "every event in that round."
             )
 
-        with st.expander("SQL query"):
-            st.code(queries.COLUMN_COMPLETENESS, language="sql")
+            # Dropdown to show SQL query used for the table
+            with st.expander("View SQL query", expanded=False):
+                st.code(queries.COLUMN_COMPLETENESS_MISSING_TABLE, language="sql")
+        except Exception as e:
+            st.error(f"Failed to load completeness table: {e}")
 
     except Exception as e:
         st.error(f"Failed to load column completeness: {e}")
@@ -199,117 +155,113 @@ def render():
     st.markdown("---")
 
     # -------------------------------------------------------------------------
-    # Data quality scores and critical gaps analysis (combined)
+    # Padding data analysis
     # -------------------------------------------------------------------------
-    st.header("Data quality scores")
-    st.markdown(
+    st.header("Padding data analysis")
+
+    # Explanation of padding rows
+    with st.expander("ℹ️ What are padding rows?", expanded=True):
+        st.markdown(
+            """
+        **Padding rows** are “empty slots” from TagMarshal’s fixed-size locations array.
+        They are **not real telemetry**, and show up as rows where `hole_number` and `section_number` are NULL.
+
+        **How to use them:**
+        - Use `is_location_padding = FALSE` for analytics
+        - Use padding only to understand file/schema shape and ingestion quirks
         """
-        Quality score (0-100) based on importance tiers:
-        - **Tier 1 (Pace)**: Pace and pace gaps (40%)
-        - **Tier 2 (Location)**: Hole, section, GPS and start time (30%)
-        - **Tier 3 (Device)**: Battery and cache (20%)
-        - **Tier 4 (Config)**: Start hole, round type and goal time (10%)
-        """
-    )
+        )
+
+    st.markdown("Analysis of CSV padding rows and their impact on data completeness.")
 
     try:
-        dq_df = execute_query(queries.DATA_QUALITY_OVERVIEW)
-        gaps_df = execute_query(queries.CRITICAL_COLUMN_GAPS)
+        # Get padding statistics
+        padding_stats_df = execute_query(queries.TELEMETRY_COMPLETENESS_SUMMARY)
 
-        # Convert numeric columns to proper types
-        numeric_cols = [
-            "total_events",
-            "total_rounds",
-            "pct_missing_pace",
-            "pct_missing_pace_gap",
-            "pct_missing_hole",
-            "pct_missing_coords",
-            "pct_missing_battery",
-            "data_quality_score",
-        ]
-        for col in numeric_cols:
-            if col in dq_df.columns:
-                dq_df[col] = pd.to_numeric(dq_df[col], errors="coerce")
-
-        # Create doughnut charts for each course
-        def get_color_for_score(score):
-            """Get color based on score using the same color profile."""
-            if score >= 95:
-                return COLOR_GOOD
-            elif score >= 90:
-                return "#2ecc71"
-            elif score >= 85:
-                return "#58d68d"
-            elif score >= 80:
-                return "#f1c40f"
-            elif score >= 70:
-                return COLOR_WARNING
-            elif score >= 60:
-                return "#f39c12"
-            else:
-                return COLOR_CRITICAL
-
-        cols = st.columns(len(dq_df))
-        for idx, (_, row) in enumerate(dq_df.iterrows()):
+        # Display summary metrics
+        st.subheader("Padding overview")
+        cols = st.columns(len(padding_stats_df))
+        for idx, (_, row) in enumerate(padding_stats_df.iterrows()):
             with cols[idx]:
-                score = row["data_quality_score"]
                 course_name = row["course_id"]
-                total_rounds = row["total_rounds"]
-                total_events = row["total_events"]
-                color = get_color_for_score(score)
+                padding_pct = row["pct_padding_total"]
+                padding_rows = int(row["padding_rows"])
+                non_padding_rows = int(row["non_padding_rows"])
 
-                # Create doughnut chart
-                fig = go.Figure(
-                    data=[
-                        go.Pie(
-                            values=[score, 100 - score],
-                            hole=0.7,
-                            marker=dict(
-                                colors=[color, "#e9ecef"],
-                                line=dict(color="#ffffff", width=2),
-                            ),
-                            textinfo="none",
-                            showlegend=False,
-                        )
-                    ]
+                st.metric(
+                    label=course_name,
+                    value=f"{padding_pct:.1f}%",
+                    delta=f"{padding_rows:,} rows",
+                    help=f"Total: {padding_rows:,} padding, {non_padding_rows:,} non-padding",
                 )
 
-                fig.update_layout(
-                    title=dict(
-                        text=course_name,
-                        font=dict(size=14, color="black"),
-                        x=0.5,
-                        xanchor="center",
-                    ),
-                    height=200,
-                    margin=dict(l=0, r=0, t=40, b=0),
-                    annotations=[
-                        dict(
-                            text=f"{score:.2f}%",
-                            x=0.5,
-                            y=0.5,
-                            xanchor="center",
-                            yanchor="middle",
-                            font=dict(size=20, color="black", family="Arial Black"),
-                            showarrow=False,
-                        )
-                    ],
-                )
+        # Visualization: Padding vs non-padding breakdown
+        st.subheader("Padding breakdown by course")
 
-                st.plotly_chart(fig, use_container_width=True)
-                st.markdown(
-                    f'<p style="text-align: center; margin-top: -10px; font-size: 0.85em; color: #6c757d;">{total_rounds:,} rounds<br>{total_events:,} events</p>',
-                    unsafe_allow_html=True,
-                )
+        # Prepare data for stacked bar chart
+        padding_viz_data = []
+        for _, row in padding_stats_df.iterrows():
+            padding_viz_data.append(
+                {
+                    "course_id": row["course_id"],
+                    "Type": "Padding rows",
+                    "Count": int(row["padding_rows"]),
+                    "Percentage": float(row["pct_padding_total"]),
+                }
+            )
+            padding_viz_data.append(
+                {
+                    "course_id": row["course_id"],
+                    "Type": "Non-padding rows",
+                    "Count": int(row["non_padding_rows"]),
+                    "Percentage": 100.0 - float(row["pct_padding_total"]),
+                }
+            )
+
+        padding_viz_df = pd.DataFrame(padding_viz_data)
+
+        fig_padding = px.bar(
+            padding_viz_df,
+            x="course_id",
+            y="Count",
+            color="Type",
+            title="Row count: Padding vs Non-padding",
+            labels={"course_id": "Course", "Count": "Number of rows"},
+            color_discrete_map={
+                "Padding rows": "#ff9800",
+                "Non-padding rows": "#28a745",
+            },
+        )
+        fig_padding.update_layout(
+            height=400,
+            margin=dict(l=0, r=0, t=40, b=0),
+            legend=dict(
+                orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
+            ),
+        )
+        st.plotly_chart(fig_padding, use_container_width=True)
+
+    except Exception as e:
+        st.error(f"Failed to load padding data analysis: {e}")
+
+    st.markdown("---")
+
+    # -------------------------------------------------------------------------
+    # Critical gaps analysis
+    # -------------------------------------------------------------------------
+    st.header("Critical gaps analysis")
+
+    try:
+        gaps_df = execute_query(queries.CRITICAL_COLUMN_GAPS)
 
         # Detailed gaps table (tier filtered)
         st.subheader("Detailed gaps")
         tier_options = [
-            "All",
-            "1 Pace",
-            "2 Location",
-            "3 Device",
-            "4 Config",
+            "All tiers",
+            "1. Pace",
+            "2. Location",
+            "3. Device",
+            "4. Config",
         ]
         selected_tier = st.radio(
             "Select tier to view:",
@@ -319,34 +271,32 @@ def render():
         )
 
         tier_columns = {
-            "1 Pace": [
+            "1. Pace": [
                 ("Pace", "pct_null_pace"),
                 ("Pace gap", "pct_null_pace_gap"),
                 ("Positional gap", "pct_null_positional_gap"),
             ],
-            "2 Location": [
+            "2. Location": [
                 ("Hole", "pct_null_hole"),
                 ("Section", "pct_null_section"),
                 ("GPS", "pct_null_latitude"),
                 ("Start time", "pct_null_timestamp"),
             ],
-            "3 Device": [
+            "3. Device": [
                 ("Battery", "pct_null_battery"),
-                ("Cache", "pct_null_cache_flag"),
             ],
-            "4 Config": [
+            "4. Config": [
                 ("Start hole", "pct_null_start_hole"),
-                ("Round type", "pct_null_nine_hole_flag"),
                 ("Goal time", "pct_null_goal_time"),
             ],
         }
 
-        if selected_tier == "All":
+        if selected_tier == "All tiers":
             selected_metrics = (
-                tier_columns["1 Pace"]
-                + tier_columns["2 Location"]
-                + tier_columns["3 Device"]
-                + tier_columns["4 Config"]
+                tier_columns["1. Pace"]
+                + tier_columns["2. Location"]
+                + tier_columns["3. Device"]
+                + tier_columns["4. Config"]
             )
         else:
             selected_metrics = tier_columns[selected_tier]
@@ -408,73 +358,140 @@ def render():
                 rename_dict[pct_col] = new_pct_name
                 updated_format_dict[new_pct_name] = format_dict[pct_col]
 
-        st.dataframe(
+        # Apply color coding to percentage columns
+        def color_missing_pct(val):
+            """Color code based on missing percentage."""
+            if pd.isna(val):
+                return ""
+            try:
+                pct = float(val)
+                if pct == 0:
+                    return f"background-color: {COLOR_GOOD}; color: white;"
+                elif pct < 5:
+                    return f"background-color: #90EE90; color: black;"  # Light green
+                elif pct < 20:
+                    return f"background-color: {COLOR_WARNING}; color: black;"  # Yellow/Amber
+                elif pct < 50:
+                    return f"background-color: #ff9800; color: white;"  # Orange
+                else:
+                    return f"background-color: {COLOR_CRITICAL}; color: white;"  # Red
+            except (ValueError, TypeError):
+                return ""
+
+        # Create styled dataframe
+        styled_df = (
             gaps_display_df[display_cols]
             .rename(columns=rename_dict)
-            .style.format(updated_format_dict),
-            use_container_width=True,
+            .style.format(updated_format_dict)
         )
 
-        # Status summary cards
-        st.subheader("Status by tier")
+        # Apply color to percentage columns
+        for col in styled_df.columns:
+            if " (%)" in col:
+                styled_df = styled_df.applymap(color_missing_pct, subset=[col])
 
-        for _, row in gaps_df.iterrows():
-            with st.container():
-                col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 2, 3])
+        st.dataframe(styled_df, use_container_width=True)
 
-                with col1:
-                    st.markdown(f"**{row['course_id']}**")
-                    st.caption(f"Usability: {row['usability_score']:.3f}%")
+        # Course drill-down (simple)
+        st.subheader("Course drill-down")
+        st.caption("Missing values by field for each course.")
 
-                with col2:
-                    st.markdown("**Pace**")
-                    st.markdown(row["pace_data_status"])
+        # Convert required columns to numeric once
+        numeric_cols_gaps = [
+            "total_events",
+            "pct_null_pace",
+            "pct_null_pace_gap",
+            "pct_null_positional_gap",
+            "pct_null_hole",
+            "pct_null_section",
+            "pct_null_latitude",
+            "pct_null_timestamp",
+            "pct_null_battery",
+            "pct_null_start_hole",
+            "pct_null_goal_time",
+        ]
+        for col in numeric_cols_gaps:
+            if col in gaps_df.columns:
+                gaps_df[col] = pd.to_numeric(gaps_df[col], errors="coerce")
 
-                with col3:
-                    st.markdown("**Location**")
-                    st.markdown(row["location_data_status"])
+        metric_map = [
+            ("1. Pace", "Pace", "pct_null_pace"),
+            ("1. Pace", "Pace gap", "pct_null_pace_gap"),
+            ("1. Pace", "Positional gap", "pct_null_positional_gap"),
+            ("2. Location", "Hole", "pct_null_hole"),
+            ("2. Location", "Section", "pct_null_section"),
+            ("2. Location", "GPS", "pct_null_latitude"),
+            ("2. Location", "Start time", "pct_null_timestamp"),
+            ("3. Device", "Battery", "pct_null_battery"),
+            ("4. Config", "Start hole", "pct_null_start_hole"),
+            ("4. Config", "Goal time", "pct_null_goal_time"),
+        ]
 
-                with col4:
-                    st.markdown("**Device**")
-                    st.markdown(row["device_health_status"])
+        course_ids = gaps_df["course_id"].astype(str).tolist()
+        tabs = st.tabs(course_ids)
+        for i, course_id in enumerate(course_ids):
+            with tabs[i]:
+                course_row = gaps_df[
+                    gaps_df["course_id"].astype(str) == course_id
+                ].iloc[0]
+                total_events = course_row.get("total_events", 0)
+                if pd.isna(total_events):
+                    total_events = 0
 
-                with col5:
-                    st.markdown("**Recommendation**")
-                    st.caption(row["top_recommendation"])
+                rows = []
+                for tier_name, field_name, pct_col in metric_map:
+                    pct = course_row.get(pct_col, 0)
+                    if pd.isna(pct):
+                        pct = 0
+                    missing_count = (
+                        int(round((float(pct) / 100.0) * float(total_events)))
+                        if total_events
+                        else 0
+                    )
+                    rows.append(
+                        {
+                            "Tier": tier_name,
+                            "Field": field_name,
+                            "Missing (#)": missing_count,
+                            "Missing (%)": float(pct),
+                        }
+                    )
 
-                st.markdown("---")
+                course_df = (
+                    pd.DataFrame(rows)
+                    .sort_values(
+                        ["Missing (%)", "Missing (#)"], ascending=[False, False]
+                    )
+                    .head(5)
+                )
 
-        with st.expander("SQL query"):
-            st.code(queries.CRITICAL_COLUMN_GAPS, language="sql")
+                def colour_pct(val):
+                    pct_val = float(val)
+                    if pct_val >= 20:
+                        return f"background-color: {COLOR_CRITICAL}; color: white;"
+                    if pct_val >= 5:
+                        return f"background-color: {COLOR_WARNING}; color: black;"
+                    if pct_val > 0:
+                        return "background-color: #90EE90; color: black;"
+                    return f"background-color: {COLOR_GOOD}; color: white;"
+
+                styled_course = course_df.style.format(
+                    {
+                        "Missing (#)": "{:,}",
+                        "Missing (%)": "{:.1f}%",
+                    }
+                ).applymap(colour_pct, subset=["Missing (%)"])
+                st.dataframe(
+                    styled_course, use_container_width=True, hide_index=True, height=300
+                )
 
     except Exception as e:
         st.error(f"Failed to load data quality scores: {e}")
 
-        # Status summary cards
-        st.subheader("Status by tier")
-
-        for _, row in gaps_df.iterrows():
-            with st.container():
-                col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 2, 3])
-
-                with col1:
-                    st.markdown(f"**{row['course_id']}**")
-                    st.caption(f"Usability: {row['usability_score']:.3f}%")
-
-                with col2:
-                    st.markdown("**Pace**")
-                    st.markdown(row["pace_data_status"])
-
-                with col3:
-                    st.markdown("**Location**")
-                    st.markdown(row["location_data_status"])
-
-                with col4:
-                    st.markdown("**Device**")
-                    st.markdown(row["device_health_status"])
-
-                with col5:
-                    st.markdown("**Recommendation**")
-                    st.caption(row["top_recommendation"])
-
-                st.markdown("---")
+    st.markdown("---")
+    render_dbt_models_section(
+        [
+            "data_quality_overview.sql",
+            "critical_column_gaps.sql",
+        ]
+    )

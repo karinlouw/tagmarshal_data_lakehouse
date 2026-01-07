@@ -873,9 +873,10 @@ silver-all ingest_date="":
   echo "  Mode: $PIPELINE_MODE"
   echo ""
   
-  # Get unique courses from CSV files
+  # Get unique courses from CSV and JSON files
   declare -a courses=()
-  for file in data/*.csv; do
+  for file in data/*.csv data/*.json; do
+    [ -f "$file" ] || continue
     filename=$(basename "$file")
     course_id=$(echo "$filename" | sed -E 's/\.rounds.*//; s/\..*//')
     # Only add if not already in array (avoid duplicates)
@@ -898,7 +899,7 @@ silver-all ingest_date="":
     
     for i in "${!courses[@]}"; do
       course_id="${courses[$i]}"
-    bronze_prefix="course_id=$course_id/ingest_date=$INGEST_DATE/"
+      bronze_prefix="course_id=$course_id/ingest_date=$INGEST_DATE/"
       
       echo ""
       echo "  [$((i+1))/$TOTAL] $course_id"
@@ -1057,7 +1058,8 @@ generate-topology:
   
   # Run generator in Spark container and capture output to tmp file
   echo "  ⏳ Analyzing Silver data..."
-  docker exec spark python3 /opt/tagmarshal/pipeline/scripts/generate_topology.py --output /tmp/topology.csv 2>&1 | grep -v "NativeCodeLoader\|SLF4J\|MetricsConfig" || true
+  # Use spark-submit so PySpark is available (plain `python3` may not have pyspark on PYTHONPATH)
+  docker exec spark /opt/spark/bin/spark-submit --master local[2] /opt/tagmarshal/pipeline/scripts/generate_topology.py --output /tmp/topology.csv 2>&1 | grep -v "NativeCodeLoader\\|SLF4J\\|MetricsConfig" || true
 
   # Copy result back to host
   echo "  📥 Updating local topology file..."
@@ -1091,7 +1093,26 @@ seed-topology:
 
   # 2. Run Spark job to load it into Iceberg
   echo "  ❄️  Loading into Iceberg table (iceberg.silver.dim_facility_topology)..."
-  docker exec spark python3 /opt/tagmarshal/pipeline/scripts/seed_topology.py
+  # Use spark-submit so PySpark is available, and include required Iceberg + S3A JARs on the classpath
+  JARS="/opt/spark/extra-jars/iceberg-spark-runtime-3.5_2.12-1.4.3.jar,/opt/spark/extra-jars/aws-java-sdk-bundle-1.12.262.jar,/opt/spark/extra-jars/hadoop-aws-3.3.4.jar,/opt/spark/extra-jars/bundle-2.20.18.jar,/opt/spark/extra-jars/url-connection-client-2.20.18.jar"
+  REGION=$(grep "^TM_S3_REGION=" config/local.env 2>/dev/null | cut -d= -f2 || echo "us-east-1")
+  ACCESS=$(grep "^TM_S3_ACCESS_KEY=" config/local.env 2>/dev/null | cut -d= -f2 || echo "minioadmin")
+  SECRET=$(grep "^TM_S3_SECRET_KEY=" config/local.env 2>/dev/null | cut -d= -f2 || echo "minioadmin")
+  ENDPOINT=$(grep "^TM_S3_ENDPOINT=" config/local.env 2>/dev/null | cut -d= -f2 || echo "http://minio:9000")
+  docker exec \
+    -e AWS_REGION="$REGION" \
+    -e AWS_ACCESS_KEY_ID="$ACCESS" \
+    -e AWS_SECRET_ACCESS_KEY="$SECRET" \
+    -e TM_S3_REGION="$REGION" \
+    -e TM_S3_ACCESS_KEY="$ACCESS" \
+    -e TM_S3_SECRET_KEY="$SECRET" \
+    -e TM_S3_ENDPOINT="$ENDPOINT" \
+    spark \
+    /opt/spark/bin/spark-submit --master local[2] \
+    --conf "spark.driver.extraJavaOptions=-Daws.region=$REGION" \
+    --conf "spark.executor.extraJavaOptions=-Daws.region=$REGION" \
+    --jars "$JARS" \
+    /opt/tagmarshal/pipeline/scripts/seed_topology.py
 
   echo ""
   echo "  ✅ Seeding complete"
@@ -1114,7 +1135,26 @@ seed-course-profile:
 
   # 2. Run Spark job to load it into Iceberg (MERGE / upsert)
   echo "  ❄️  Loading into Iceberg table (iceberg.silver.dim_course_profile)..."
-  docker exec spark python3 /opt/tagmarshal/pipeline/scripts/seed_course_profile.py
+  # Use spark-submit so PySpark is available, and include required Iceberg + S3A JARs on the classpath
+  JARS="/opt/spark/extra-jars/iceberg-spark-runtime-3.5_2.12-1.4.3.jar,/opt/spark/extra-jars/aws-java-sdk-bundle-1.12.262.jar,/opt/spark/extra-jars/hadoop-aws-3.3.4.jar,/opt/spark/extra-jars/bundle-2.20.18.jar,/opt/spark/extra-jars/url-connection-client-2.20.18.jar"
+  REGION=$(grep "^TM_S3_REGION=" config/local.env 2>/dev/null | cut -d= -f2 || echo "us-east-1")
+  ACCESS=$(grep "^TM_S3_ACCESS_KEY=" config/local.env 2>/dev/null | cut -d= -f2 || echo "minioadmin")
+  SECRET=$(grep "^TM_S3_SECRET_KEY=" config/local.env 2>/dev/null | cut -d= -f2 || echo "minioadmin")
+  ENDPOINT=$(grep "^TM_S3_ENDPOINT=" config/local.env 2>/dev/null | cut -d= -f2 || echo "http://minio:9000")
+  docker exec \
+    -e AWS_REGION="$REGION" \
+    -e AWS_ACCESS_KEY_ID="$ACCESS" \
+    -e AWS_SECRET_ACCESS_KEY="$SECRET" \
+    -e TM_S3_REGION="$REGION" \
+    -e TM_S3_ACCESS_KEY="$ACCESS" \
+    -e TM_S3_SECRET_KEY="$SECRET" \
+    -e TM_S3_ENDPOINT="$ENDPOINT" \
+    spark \
+    /opt/spark/bin/spark-submit --master local[2] \
+    --conf "spark.driver.extraJavaOptions=-Daws.region=$REGION" \
+    --conf "spark.executor.extraJavaOptions=-Daws.region=$REGION" \
+    --jars "$JARS" \
+    /opt/tagmarshal/pipeline/scripts/seed_course_profile.py
 
   echo ""
   echo "  ✅ Seeding complete"

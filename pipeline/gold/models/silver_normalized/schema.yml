@@ -1,0 +1,64 @@
+version: 2
+
+models:
+  - name: dim_course
+    description: >
+      Normalized course dimension for exploration. Anchors on course_ids observed
+      in Silver telemetry and optionally enriches from dim_course_profile.
+    columns:
+      - name: course_id
+        tests: [not_null, unique]
+
+  - name: dim_device
+    description: >
+      Normalized device dimension for exploration. One row per device_id with
+      basic first/last-seen timestamps and battery summary stats.
+    columns:
+      - name: device_id
+        tests: [not_null, unique]
+
+  - name: dim_round
+    description: >
+      Normalized round dimension built from Silver telemetry. One row per
+      (course_id, round_id), including rollups like fix counts and timestamp-missing counts.
+    columns:
+      - name: course_id
+        tests: [not_null]
+      - name: round_id
+        tests: [not_null]
+
+  - name: fact_telemetry_fix
+    description: >
+      Normalized fix-level fact view (alias of silver.fact_telemetry_event) to support
+      normalized naming without duplicating storage.
+    columns:
+      - name: course_id
+        tests: [not_null]
+      - name: round_id
+        tests: [not_null]
+      - name: location_index
+        tests: [not_null]
+
+  - name: global_overview
+    description: >
+      Global, single-row KPI table summarizing the entire Silver telemetry dataset
+      across all courses (counts, padding rate, timestamp-missing rate, and problem-rate signals).
+
+  - name: global_course_summary
+    description: >
+      Per-course rollup for exploration and demos. Includes rounds/devices,
+      padding + timestamp-missing counts, basic completion/9-hole/secondary/auto-assigned rates,
+      and pace_gap summary stats.
+    columns:
+      - name: course_id
+        tests: [not_null, unique]
+
+  - name: global_time_patterns
+    description: >
+      Per-course time-of-day + weekday/weekend exploration table based on fix timestamps.
+      Helps demonstrate patterns like morning vs afternoon and weekend vs weekday using
+      is_problem and pace_gap metrics. Includes 'unknown' buckets when timestamps are missing.
+    columns:
+      - name: course_id
+        tests: [not_null]
+

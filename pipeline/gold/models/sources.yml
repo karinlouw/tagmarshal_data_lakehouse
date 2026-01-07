@@ -15,6 +15,15 @@ sources:
             tests:
               - not_null
           - name: fix_timestamp
+            description: "GPS fix timestamp (can be NULL; see is_timestamp_missing)"
+          - name: is_timestamp_missing
+            description: "True when fix_timestamp is NULL (Silver preserves NULL timestamps)"
+            tests:
+              - not_null
+              - dbt_utils.expression_is_true:
+                  expression: "is_timestamp_missing = (fix_timestamp IS NULL)"
+          - name: is_location_padding
+            description: "True for CSV padding rows where both hole_number and section_number are NULL"
             tests:
               - not_null
           - name: latitude
@@ -39,5 +48,11 @@ sources:
           - name: nine_number
           - name: section_start
           - name: section_end
+
+      - name: dim_course_profile
+        description: "Human-entered course metadata (seeded)."
+        columns:
+          - name: course_id
+            tests: [not_null]
 
 

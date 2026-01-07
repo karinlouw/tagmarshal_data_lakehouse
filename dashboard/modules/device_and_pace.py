@@ -5,12 +5,11 @@ analysis with an interactive map showing hole-by-hole pace issues.
 """
 
 import streamlit as st
-import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 
 from utils.database import execute_query
 from utils import queries
+from utils.dbt_provenance import render_dbt_models_section
 from utils.colors import (
     COLOR_SCALE_QUALITY,
     COLOR_SCALE_REVERSE,
@@ -83,8 +82,6 @@ def render():
                             delta_color="inverse",
                         )
 
-                with st.expander("SQL query"):
-                    st.code(queries.BATTERY_HEALTH, language="sql")
             else:
                 st.info("No battery data available.")
 
@@ -133,8 +130,6 @@ def render():
                 """
                 )
 
-                with st.expander("SQL query"):
-                    st.code(queries.SIGNAL_QUALITY_SUMMARY, language="sql")
             else:
                 st.info("No signal quality data available.")
 
@@ -343,9 +338,6 @@ def render():
                     )
                     st.plotly_chart(fig, use_container_width=True)
 
-                with st.expander("SQL query"):
-                    st.code(bottleneck_query, language="sql")
-
                 with st.expander("View raw bottleneck data"):
                     st.dataframe(
                         bottleneck_df.style.format(
@@ -443,8 +435,10 @@ def render():
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
-            with st.expander("SQL query"):
-                st.code(queries.PACE_SUMMARY, language="sql")
+            with st.expander(
+                "SQL (silver/dbt provenance: how gold is built)", expanded=False
+            ):
+                st.code(queries.DBT_PACE_SUMMARY, language="sql")
 
     except Exception as e:
         st.warning(f"Could not load pace summary: {e}")
@@ -475,4 +469,13 @@ def render():
     - Holes with consistent bottlenecks may need operational adjustments (e.g., ranger intervention)
     - Device health issues can cause false bottleneck signals - always cross-reference with data quality
     """
+    )
+
+    st.markdown("---")
+    render_dbt_models_section(
+        [
+            "pace_summary_by_round.sql",
+            "signal_quality_rounds.sql",
+            "device_health_errors.sql",
+        ]
     )

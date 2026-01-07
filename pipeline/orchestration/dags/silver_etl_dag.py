@@ -12,8 +12,16 @@ Configuration is driven by environment variables (see config/local.env and confi
 from __future__ import annotations
 
 import os
+import re
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "lib"))
+
+from tm_lakehouse.config import TMConfig
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
@@ -72,6 +80,8 @@ def log_to_registry(
 
 def run_spark_etl(**context):
     """Run Spark ETL job to transform Landing Zone CSV into Silver Iceberg table."""
+    cfg = TMConfig.from_env()
+
     # Get params from DAG trigger conf
     run_conf = context.get("dag_run").conf or {}
 
@@ -91,7 +101,7 @@ def run_spark_etl(**context):
     print(f"{'='*60}")
     print(f"  Course:      {course_id}")
     print(f"  Date:        {ingest_date}")
-    print(f"  Source:      s3://tm-lakehouse-landing-zone/{bronze_prefix}")
+    print(f"  Source:      s3://{cfg.bucket_landing}/{bronze_prefix}")
     print(f"  Environment: {env}")
     print(f"  Spark Config:")
     print(f"    Master:     {SPARK_CONFIG['master']}")
@@ -115,17 +125,35 @@ def run_spark_etl(**context):
     )
 
     # Build command with config-driven settings
+    docker_env = [
+        "-e",
+        f"AWS_REGION={cfg.s3_region}",
+        "-e",
+        f"TM_BUCKET_LANDING={cfg.bucket_landing}",
+        "-e",
+        f"TM_BUCKET_SOURCE={cfg.bucket_source}",
+        "-e",
+        f"TM_BUCKET_QUARANTINE={cfg.bucket_quarantine}",
+        "-e",
+        f"TM_BUCKET_OBSERVABILITY={cfg.bucket_observability}",
+        "-e",
+        f"TM_ICEBERG_WAREHOUSE_SILVER={cfg.iceberg_warehouse_silver}",
+        "-e",
+        f"TM_DB_SILVER={cfg.db_silver}",
+        "-e",
+        f"TM_S3_REGION={cfg.s3_region}",
+    ]
+    if cfg.s3_endpoint:
+        docker_env += ["-e", f"TM_S3_ENDPOINT={cfg.s3_endpoint}"]
+    if cfg.s3_access_key:
+        docker_env += ["-e", f"TM_S3_ACCESS_KEY={cfg.s3_access_key}"]
+    if cfg.s3_secret_key:
+        docker_env += ["-e", f"TM_S3_SECRET_KEY={cfg.s3_secret_key}"]
+
     cmd = [
         "docker",
         "exec",
-        "-e",
-        "AWS_REGION=us-east-1",
-        "-e",
-        "TM_BUCKET_LANDING=tm-lakehouse-landing-zone",
-        "-e",
-        "TM_BUCKET_SOURCE=tm-lakehouse-source-store",
-        "-e",
-        "TM_ICEBERG_WAREHOUSE_SILVER=s3a://tm-lakehouse-source-store/warehouse",
+        *docker_env,
         "spark",
         "/opt/spark/bin/spark-submit",
         "--master",
@@ -162,20 +190,62 @@ def run_spark_etl(**context):
     # Run the command
     result = subprocess.run(cmd, capture_output=True, text=True)
 
+    def _filter_spark_noise(text: str) -> list[str]:
+        """
+        Keep high-signal ETL output, drop Spark/Java INFO spam.
+
+        Spark commonly prefixes logs like: '26/01/07 14:30:03 INFO ...'
+        We also drop common SLF4J + Hadoop native loader noise.
+        """
+        if not text:
+            return []
+
+        drop_patterns = [
+            re.compile(r"^\d{2}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}\s+(INFO|WARN|ERROR)\b"),
+            re.compile(r"^SLF4J:"),
+        ]
+        drop_substrings = (
+            "NativeCodeLoader",
+            "MetricsConfig",
+            "SparkUI",
+            "BlockManager",
+            "Executor:",
+            "SparkContext:",
+            "ResourceProfile",
+        )
+
+        kept: list[str] = []
+        for raw in text.splitlines():
+            line = raw.rstrip()
+            if not line:
+                continue
+            if any(p.match(line) for p in drop_patterns):
+                continue
+            if any(s in line for s in drop_substrings):
+                continue
+            kept.append(line)
+        return kept
+
     # Print output
     if result.stdout:
         print("  [Spark stdout]")
-        for line in result.stdout.split("\n")[-30:]:  # Last 30 lines
+        lines = _filter_spark_noise(result.stdout)
+        tail = lines[-60:] if lines else []
+        for line in tail:
             print(f"    {line}")
 
     if result.returncode != 0:
         print(f"\n  ❌ Spark job failed with exit code {result.returncode}")
         if result.stderr:
             print("  [Spark stderr]")
-            for line in result.stderr.split("\n")[-20:]:  # Last 20 lines
+            lines = _filter_spark_noise(result.stderr)
+            # Keep a slightly longer tail for exceptions/stacktraces
+            tail = lines[-120:] if lines else []
+            for line in tail:
                 print(f"    {line}")
 
         # Log failure to registry for resumability
+        # Preserve raw stderr tail for the exception message (even if logs are noisy)
         error_msg = result.stderr[-500:] if result.stderr else "No error message"
         log_to_registry(
             course_id,
@@ -193,8 +263,6 @@ def run_spark_etl(**context):
         if "Appended" in line and "rows" in line:
             try:
                 # Parse "→ Appended 67,660 rows"
-                import re
-
                 match = re.search(r"(\d[\d,]*)\s*rows", line)
                 if match:
                     rows_processed = int(match.group(1).replace(",", ""))
@@ -234,7 +302,14 @@ with DAG(
     start_date=datetime(2025, 1, 1),
     schedule=None,
     catchup=False,
-    default_args={"retries": 1},
+    # Fail-fast defaults for local dev: Airflow's implicit default retry_delay is 5 minutes,
+    # which makes failures look like they "hang" for a long time. Keep a retry, but shorten delay.
+    default_args={
+        "retries": int(os.getenv("TM_AIRFLOW_SILVER_RETRIES", "1")),
+        "retry_delay": timedelta(
+            seconds=int(os.getenv("TM_AIRFLOW_SILVER_RETRY_DELAY_SECONDS", "30"))
+        ),
+    },
     doc_md="""
 ### Silver ETL (Spark)
 Transforms Landing Zone CSV into Silver Iceberg table (long format).

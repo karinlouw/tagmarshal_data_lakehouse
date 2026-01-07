@@ -1,13 +1,10 @@
 """Course configuration page.
 
-Displays course type analysis, shotgun start patterns, round completion rates,
-and complexity scores.
+Displays course type analysis, shotgun start patterns, and round completion rates.
 """
 
 import streamlit as st
-import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 
 from utils.database import execute_query
 from utils import queries
@@ -18,6 +15,7 @@ from utils.colors import (
     COLOR_SCALE_QUALITY,
     COLOR_INFO,
 )
+from utils.dbt_provenance import render_dbt_models_section
 
 
 def render():
@@ -26,13 +24,15 @@ def render():
     st.title("Course configuration analysis")
     st.markdown(
         """
-    This page analyses the complexity and configuration patterns of each course,
+    This page analyses the configuration patterns of each course,
     helping to understand the variety of course setups in the data.
     """
     )
 
     try:
         config_df = execute_query(queries.COURSE_CONFIGURATION)
+        # Always sort courses alphabetically
+        config_df = config_df.sort_values("course_id", ascending=True).reset_index(drop=True)
     except Exception as e:
         st.error(f"Failed to load course configuration data: {e}")
         return
@@ -42,10 +42,10 @@ def render():
     # -------------------------------------------------------------------------
     st.header("Course type breakdown")
 
-    col1, col2 = st.columns([1, 2])
+    # Chart (40%) + table (60%) layout
+    col1, col2 = st.columns([2, 3], gap="large")
 
     with col1:
-        # Course type pie chart
         type_counts = config_df["likely_course_type"].value_counts().reset_index()
         type_counts.columns = ["course_type", "count"]
 
@@ -55,40 +55,58 @@ def render():
             names="course_type",
             title="Courses by type",
             color_discrete_sequence=COLOR_SEQUENCE,
+            hole=0.4,  # Makes it a donut chart
+        )
+        fig.update_traces(
+            textposition="inside",
+            textinfo="label+percent",
+            textfont=dict(color="white", size=12),
+            insidetextorientation="auto",
         )
         fig.update_layout(
-            height=300,
+            height=340,
             margin=dict(l=0, r=0, t=40, b=0),
+            showlegend=False,  # Hide legend, show labels on chart
         )
         st.plotly_chart(fig, use_container_width=True)
 
     with col2:
-        # Course type details
-        st.markdown("**Course types detected:**")
+        st.markdown("**Course types detected**")
 
-        for _, row in config_df.iterrows():
-            course_type = row["likely_course_type"]
-            if course_type == "27-hole":
-                icon = "🏌️🏌️🏌️"
-                desc = "Three sets of 9 holes"
-            elif course_type == "18-hole":
-                icon = "🏌️🏌️"
-                desc = "Standard 18-hole course"
-            else:
-                icon = "🏌️"
-                desc = "9-hole course (may be played as loop)"
+        type_desc_map = {
+            "27-hole": "Three sets of 9 holes",
+            "18-hole": "Standard 18-hole course",
+            "9-hole": "9-hole course (may be played as loop)",
+        }
 
-            st.markdown(
-                f"""
-            **{row['course_id']}**: {icon} {course_type}
-            - {row['total_rounds']:,} rounds
-            - Max section: {row['max_section_seen']}
-            - {desc}
-            """
-            )
+        type_icon_map = {"27-hole": "🏌️🏌️🏌️", "18-hole": "🏌️🏌️", "9-hole": "🏌️"}
 
-    with st.expander("SQL query"):
-        st.code(queries.COURSE_CONFIGURATION, language="sql")
+        course_type_table = config_df[
+            ["course_id", "likely_course_type", "total_rounds", "max_section_seen"]
+        ].copy()
+        course_type_table["course_type"] = course_type_table["likely_course_type"].map(
+            lambda t: f"{type_icon_map.get(t, '')} {t}".strip()
+        )
+        course_type_table["description"] = course_type_table["likely_course_type"].map(
+            lambda t: type_desc_map.get(t, "")
+        )
+
+        course_type_table = course_type_table.drop(columns=["likely_course_type"]).rename(
+            columns={
+                "course_id": "Course",
+                "course_type": "Type",
+                "total_rounds": "Rounds",
+                "max_section_seen": "Max section",
+                "description": "Notes",
+            }
+        )
+
+        course_type_table = course_type_table.sort_values("Course", ascending=True).reset_index(drop=True)
+
+        st.dataframe(
+            course_type_table.style.format({"Rounds": "{:,.0f}"}).hide(axis="index"),
+            use_container_width=True,
+        )
 
     st.markdown("---")
 
@@ -103,7 +121,6 @@ def render():
     """
     )
 
-    # Stacked bar chart for completion
     completion_data = config_df[["course_id", "pct_complete", "pct_incomplete"]].copy()
     completion_data = completion_data.melt(
         id_vars=["course_id"],
@@ -132,14 +149,13 @@ def render():
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # Metrics row
     cols = st.columns(len(config_df))
     for idx, (_, row) in enumerate(config_df.iterrows()):
         with cols[idx]:
             pct = row["pct_complete"] or 0
             st.metric(
                 label=row["course_id"],
-                value=f"{pct:.2f}%",
+                value=f"{pct:.1f}%",
                 delta="complete",
             )
 
@@ -156,42 +172,52 @@ def render():
     """
     )
 
-    col1, col2 = st.columns(2)
+    col1, col2 = st.columns([1, 1], gap="large")
 
     with col1:
-        # Shotgun start percentage bar chart
+        plot_df = config_df.sort_values("pct_shotgun_starts", ascending=True).copy()
         fig = px.bar(
-            config_df.sort_values("pct_shotgun_starts", ascending=False),
-            x="course_id",
-            y="pct_shotgun_starts",
-            title="Shotgun start percentage by course",
-            labels={"pct_shotgun_starts": "Shotgun starts (%)", "course_id": "Course"},
+            plot_df,
+            y="course_id",
+            x="pct_shotgun_starts",
+            orientation="h",
+            title="Shotgun start rate by course",
+            labels={"pct_shotgun_starts": "Shotgun starts (%)", "course_id": ""},
             color="pct_shotgun_starts",
             color_continuous_scale=COLOR_SCALE_QUALITY,
         )
+        fig.update_traces(text=plot_df["pct_shotgun_starts"], texttemplate="%{text:.1f}%", textposition="outside")
         fig.update_layout(
-            height=300,
-            margin=dict(l=0, r=0, t=40, b=0),
+            template="plotly_white",
+            height=340,
+            margin=dict(l=0, r=0, t=50, b=0),
             showlegend=False,
         )
+        fig.update_xaxes(range=[0, max(5.0, float(plot_df["pct_shotgun_starts"].max() or 0) * 1.2)], ticksuffix="%")
+        fig.update_yaxes(categoryorder="array", categoryarray=plot_df["course_id"].tolist())
         st.plotly_chart(fig, use_container_width=True)
 
     with col2:
-        # Unique start holes
+        plot_df = config_df.sort_values("unique_start_holes", ascending=True).copy()
         fig = px.bar(
-            config_df.sort_values("unique_start_holes", ascending=False),
-            x="course_id",
-            y="unique_start_holes",
+            plot_df,
+            y="course_id",
+            x="unique_start_holes",
+            orientation="h",
             title="Unique start holes observed",
-            labels={"unique_start_holes": "Start holes", "course_id": "Course"},
+            labels={"unique_start_holes": "Start holes", "course_id": ""},
             color="unique_start_holes",
             color_continuous_scale=COLOR_SCALE_QUALITY,
         )
+        fig.update_traces(text=plot_df["unique_start_holes"], texttemplate="%{text:.0f}", textposition="outside")
         fig.update_layout(
-            height=300,
-            margin=dict(l=0, r=0, t=40, b=0),
+            template="plotly_white",
+            height=340,
+            margin=dict(l=0, r=0, t=50, b=0),
             showlegend=False,
         )
+        fig.update_xaxes(range=[0, max(3.0, float(plot_df["unique_start_holes"].max() or 0) * 1.2)])
+        fig.update_yaxes(categoryorder="array", categoryarray=plot_df["course_id"].tolist())
         st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("---")
@@ -237,42 +263,6 @@ def render():
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown("---")
-
-    # -------------------------------------------------------------------------
-    # Complexity scores
-    # -------------------------------------------------------------------------
-    st.header("Course complexity scores")
-    st.markdown(
-        """
-    Complexity score combines multiple factors:
-    - Course type (27-hole = highest complexity)
-    - Number of unique start holes (shotgun patterns)
-    - Mix of round types (9-hole vs full)
-    - Incomplete round rates
-    
-    Higher scores indicate more complex tracking requirements.
-    """
-    )
-
-    fig = px.bar(
-        config_df.sort_values("course_complexity_score", ascending=True),
-        x="course_complexity_score",
-        y="course_id",
-        orientation="h",
-        title="Course complexity score",
-        labels={"course_complexity_score": "Complexity score", "course_id": "Course"},
-        color="course_complexity_score",
-        color_continuous_scale=COLOR_SCALE_QUALITY,
-    )
-    fig.update_layout(
-        height=300,
-        margin=dict(l=0, r=0, t=40, b=0),
-        showlegend=False,
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-    # Detailed configuration table
     with st.expander("View full configuration data"):
         display_cols = [
             "course_id",
@@ -297,3 +287,6 @@ def render():
             ),
             use_container_width=True,
         )
+
+    st.markdown("---")
+    render_dbt_models_section(["course_configuration_analysis.sql"])

@@ -12,6 +12,9 @@ from modules import course_configuration
 from modules import course_topology
 from modules import seasonality
 from modules import device_and_pace
+from modules import data_explorer
+from utils.database import execute_query
+from utils import queries
 
 # Page configuration
 st.set_page_config(
@@ -71,6 +74,7 @@ PAGES = {
     "Course topology": course_topology,
     "Seasonality": seasonality,
     "Device and pace analysis": device_and_pace,
+    "Data explorer": data_explorer,
 }
 
 
@@ -95,20 +99,68 @@ def main():
 
         st.markdown("---")
 
-        # About section
-        st.markdown(
+        # Course information section (only for Course configuration page)
+        if selected_page == "Course configuration":
+            try:
+                config_df = execute_query(queries.COURSE_CONFIGURATION)
+                
+                # Course display name mapping
+                course_display_names = {
+                    "americanfalls": "American Falls",
+                    "bradshawfarmgc": "Bradshaw Farm GC",
+                    "erinhills": "Erin Hills",
+                    "indiancreek": "Indian Creek",
+                    "pinehurst4": "Pinehurst 4",
+                }
+                
+                # Create course summary
+                course_summary = []
+                for _, row in config_df.iterrows():
+                    course_id = row["course_id"]
+                    course_type = row["likely_course_type"]
+                    display_name = course_display_names.get(course_id, course_id)
+                    
+                    # Extract hole count from course type
+                    if course_type == "27-hole":
+                        hole_count = "27"
+                    elif course_type == "18-hole":
+                        hole_count = "18"
+                    else:
+                        hole_count = "9"
+                    
+                    course_summary.append({
+                        "name": display_name,
+                        "hole_count": hole_count,
+                        "course_id": course_id,
+                    })
+                
+                # Sort alphabetically by display name
+                course_summary.sort(key=lambda x: x["name"])
+                
+                # Display course information
+                st.markdown("**Course summary**")
+                for course in course_summary:
+                    st.markdown(f"- **{course['name']}** - {course['hole_count']}-hole")
+                    
+            except Exception:
+                # If query fails, show fallback
+                st.markdown("**Course summary**")
+                st.caption("Unable to load course data")
+        else:
+            # Default about section for other pages
+            st.markdown(
+                """
+            **Phase 1 deliverable**
+            
+            This dashboard presents data quality 
+            metrics for the 5 pilot courses:
+            - Bradshaw Farm GC
+            - Indian Creek
+            - American Falls
+            - Erin Hills
+            - Pinehurst 4
             """
-        **Phase 1 deliverable**
-        
-        This dashboard presents data quality 
-        metrics for the 5 pilot courses:
-        - Bradshaw Farm GC
-        - Indian Creek
-        - American Falls
-        - Erin Hills
-        - Pinehurst 4
-        """
-        )
+            )
 
         st.markdown("---")
         st.caption("Built with Streamlit + Trino")

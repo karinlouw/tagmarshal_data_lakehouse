@@ -79,6 +79,12 @@ class TMConfig:
     # Local file input
     local_input_dir: str  # /opt/tagmarshal/input (where CSV/JSON files are mounted)
 
+    # Coordinate sanity bounds (used by Silver ETL for quarantine logic)
+    coord_min_lon: float
+    coord_max_lon: float
+    coord_min_lat: float
+    coord_max_lat: float
+
     # API settings (for future TagMarshal API integration)
     data_source: str  # "file" (local CSV/JSON) or "api" (TagMarshal API)
     api_base_url: str | None
@@ -122,6 +128,11 @@ class TMConfig:
             obs_prefix=os.getenv("TM_OBS_PREFIX", ""),  # Optional prefix
             # Local input
             local_input_dir=_env("TM_LOCAL_INPUT_DIR", "/opt/tagmarshal/input"),
+            # Coordinate sanity bounds (centralized defaults)
+            coord_min_lon=float(os.getenv("TM_COORD_MIN_LON", "-180")),
+            coord_max_lon=float(os.getenv("TM_COORD_MAX_LON", "180")),
+            coord_min_lat=float(os.getenv("TM_COORD_MIN_LAT", "-90")),
+            coord_max_lat=float(os.getenv("TM_COORD_MAX_LAT", "90")),
             # API settings
             data_source=_env("TM_DATA_SOURCE", "file"),  # Default to file-based
             api_base_url=os.getenv("TM_API_BASE_URL"),

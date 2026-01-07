@@ -1,6 +1,17 @@
 name: tagmarshal-lakehouse
 
 # =============================================================================
+# CONFIGURATION
+# =============================================================================
+# Environment variables are loaded from:
+# 1. config/base.env - Shared defaults (bucket names, schemas, etc.)
+# 2. config/local.env - Local-specific overrides (MinIO endpoints, credentials)
+#
+# For AWS deployment, use: TM_ENV=aws docker-compose up
+# which would load config/aws.env instead of config/local.env
+# =============================================================================
+
+# =============================================================================
 # STORAGE LAYER (S3-compatible object storage)
 # =============================================================================
 
@@ -169,6 +180,9 @@ services:
       - postgres
       - spark
       - trino
+    env_file:
+      - config/base.env
+      - config/local.env
     environment:
       # Airflow core config
       AIRFLOW__CORE__EXECUTOR: LocalExecutor # Runs tasks in same container

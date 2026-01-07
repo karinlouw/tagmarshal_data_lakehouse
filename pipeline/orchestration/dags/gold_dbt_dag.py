@@ -130,15 +130,12 @@ Builds Gold analytical tables from Silver using dbt.
 Run after the Silver quality gate passes.
 
 **Models built:**
-- `gold.pace_summary_by_round`
-- `gold.signal_quality_rounds`
-- `gold.device_health_errors`
-- `gold.course_configuration_analysis`
-- `gold.critical_column_gaps`
-- `gold.data_quality_overview`
+- Gold analytical models under `pipeline/gold/models/gold/` (selector: `path:models/gold`)
+- Silver-normalized exploration models under `pipeline/gold/models/silver_normalized/`
 
 **Output:**
 - Gold Iceberg tables: http://localhost:9001/browser/tm-lakehouse-serve/warehouse/gold/
+- Silver Iceberg tables/views: http://localhost:9001/browser/tm-lakehouse-serve/warehouse/silver/
 - Observability: http://localhost:9001/browser/tm-lakehouse-observability/gold/
 """,
 ):
@@ -165,7 +162,9 @@ dbt deps --quiet 2>/dev/null || dbt deps
 
 echo ""
 echo "  ⏳ Running Gold models..."
-dbt run --select path:models/gold
+# NOTE: Iceberg REST catalog uses SQLite by default in local dev, which can lock under concurrency.
+# Running dbt single-threaded avoids SQLITE_BUSY during catalog updates (e.g., temp table swaps).
+dbt run --threads 1 --select path:models/silver_normalized path:models/gold
 
 echo ""
 echo "✅ DBT RUN COMPLETE"

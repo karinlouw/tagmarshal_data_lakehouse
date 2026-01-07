@@ -89,6 +89,9 @@ models:
       - name: course_id
         tests: [not_null]
       - name: month_start
+        description: >
+          Month bucket for the round start timestamp. Rounds with missing timestamps
+          are bucketed to a sentinel date (1900-01-01) with month_name = 'Unknown (missing timestamp)'.
         tests: [not_null]
       - name: month_number
       - name: month_name
@@ -104,6 +107,64 @@ models:
       - name: course_id
         tests: [not_null]
       - name: weekday_number
+        description: >
+          Day-of-week bucket for the round start timestamp (1-7). Rounds with missing timestamps
+          are bucketed to weekday_number = 0 with weekday_name = 'Unknown (missing timestamp)'.
         tests: [not_null]
       - name: weekday_name
       - name: rounds
+
+  - name: telemetry_completeness_summary
+    description: >
+      Per-course completeness summary of the Silver telemetry table, showing
+      how many rows are CSV padding slots (is_location_padding) and how many
+      have missing timestamps (is_timestamp_missing). Intended for audits and
+      demos rather than filtering.
+    columns:
+      - name: course_id
+        tests: [not_null]
+      - name: total_rows
+        description: "Total number of Silver rows for this course (including padding)."
+      - name: padding_rows
+        description: "Rows where is_location_padding = TRUE (CSV padding slots)."
+      - name: non_padding_rows
+        description: "Rows where is_location_padding = FALSE (real telemetry fixes)."
+      - name: ts_missing_rows
+        description: "Rows where is_timestamp_missing = TRUE (including padding)."
+      - name: ts_missing_non_padding_rows
+        description: "Rows where is_timestamp_missing = TRUE AND is_location_padding = FALSE."
+      - name: pct_padding_total
+        description: "Percentage of total_rows that are padding_rows (0–100)."
+      - name: pct_ts_missing_total
+        description: "Percentage of total_rows with missing timestamps (0–100)."
+      - name: pct_ts_missing_non_padding
+        description: "Percentage of non_padding_rows with missing timestamps (0–100)."
+
+  - name: gold_coverage_audit
+    description: >
+      Per-course audit table that compares core Silver telemetry counts (total,
+      padding, timestamp-missing, distinct rounds) against key Gold models
+      (fact_rounds, fact_round_hole_performance, seasonality). Designed to make
+      any unintentional filtering obvious during demos and validation.
+    columns:
+      - name: course_id
+        tests: [not_null]
+      - name: silver_total_rows
+      - name: silver_padding_rows
+      - name: silver_non_padding_rows
+      - name: silver_ts_missing_rows
+      - name: silver_ts_missing_non_padding_rows
+      - name: silver_distinct_rounds_all
+      - name: silver_distinct_rounds_non_padding
+      - name: gold_fact_rounds_rows
+      - name: gold_fact_rounds_distinct_rounds
+      - name: gold_fact_rounds_sum_fix_count
+      - name: gold_hole_perf_rows
+      - name: gold_hole_perf_distinct_rounds
+      - name: gold_hole_perf_distinct_round_hole_nine
+      - name: gold_rounds_by_month_sum_rounds
+      - name: gold_rounds_by_month_unknown_ts_rounds
+      - name: gold_rounds_by_weekday_sum_rounds
+      - name: gold_rounds_by_weekday_unknown_ts_rounds
+      - name: gold_dim_course_present
+      - name: unit_count

@@ -1,0 +1,141 @@
+// Silver ERD (DBML) - for https://dbdiagram.io
+// This is documentation-only. It reflects the current Silver tables, and a
+// recommended normalized exploration model that maps cleanly to Silver.
+
+// ---------------------------------------------------------------------------
+// A) Current physical Silver model (as-built)
+// ---------------------------------------------------------------------------
+
+Table silver_fact_telemetry_event {
+  round_id varchar [not null]
+  course_id varchar [not null]
+  ingest_date date [not null]
+
+  fix_timestamp timestamp [null]
+  is_timestamp_missing boolean [not null]
+
+  is_location_padding boolean [not null]
+  location_index int [not null]
+
+  hole_number int [null]
+  section_number int [null]
+  hole_section int [null]
+  nine_number int [null]
+
+  latitude double [null]
+  longitude double [null]
+
+  pace double [null]
+  pace_gap double [null]
+  positional_gap double [null]
+
+  battery_percentage double [null]
+  is_cache boolean [null]
+  is_projected boolean [null]
+  is_problem boolean [null]
+
+  // Round-level fields repeated on each row
+  round_start_time timestamp [null]
+  round_end_time timestamp [null]
+  start_hole int [null]
+  start_section int [null]
+  end_section int [null]
+  is_nine_hole boolean [null]
+  current_nine int [null]
+  goal_time int [null]
+  is_complete boolean [null]
+  device varchar [null]
+
+  Note: 'No single event_id exists. Effective uniqueness after dedup is (round_id, location_index, fix_timestamp) where fix_timestamp may be NULL.'
+}
+
+Table silver_dim_facility_topology {
+  facility_id varchar [not null]
+  unit_id int [not null]
+  unit_name varchar [null]
+  nine_number int [null]
+  section_start int [null]
+  section_end int [null]
+}
+
+Table silver_dim_course_profile {
+  course_id varchar [not null]
+  course_type varchar [null]
+  volume_profile varchar [null]
+  peak_season_start_month int [null]
+  peak_season_end_month int [null]
+  notes varchar [null]
+  source varchar [null]
+}
+
+Ref: silver_fact_telemetry_event.course_id > silver_dim_course_profile.course_id
+
+// Topology is technically a range join on section_number; Gold commonly joins by (course_id, nine_number).
+Ref: silver_fact_telemetry_event.course_id > silver_dim_facility_topology.facility_id
+
+// ---------------------------------------------------------------------------
+// B) Proposed normalized exploration model (recommended mental model / views)
+// ---------------------------------------------------------------------------
+
+Table dim_course {
+  course_id varchar [pk]
+}
+
+Table dim_device {
+  device_id varchar [pk]
+}
+
+Table dim_topology_unit {
+  course_id varchar
+  unit_id int
+  unit_name varchar
+  nine_number int
+  section_start int
+  section_end int
+}
+
+Table dim_round {
+  round_id varchar [pk]
+  course_id varchar
+  device_id varchar
+  round_start_time timestamp [null]
+  round_end_time timestamp [null]
+  start_hole int [null]
+  start_section int [null]
+  end_section int [null]
+  is_nine_hole boolean [null]
+  is_complete boolean [null]
+  goal_time int [null]
+}
+
+Table fact_telemetry_fix {
+  round_id varchar
+  location_index int
+  fix_timestamp timestamp [null]
+  is_timestamp_missing boolean
+  is_location_padding boolean
+  hole_number int [null]
+  section_number int [null]
+  hole_section int [null]
+  nine_number int [null]
+  latitude double [null]
+  longitude double [null]
+  pace double [null]
+  pace_gap double [null]
+  positional_gap double [null]
+  battery_percentage double [null]
+  is_cache boolean [null]
+  is_projected boolean [null]
+  is_problem boolean [null]
+
+  Indexes {
+    (round_id, location_index, fix_timestamp) [name: 'ix_fix_natural_key']
+  }
+}
+
+Ref: dim_round.course_id > dim_course.course_id
+Ref: dim_round.device_id > dim_device.device_id
+Ref: fact_telemetry_fix.round_id > dim_round.round_id
+Ref: dim_topology_unit.course_id > dim_course.course_id
+
+

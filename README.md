@@ -91,7 +91,7 @@ just topology-refresh
 - Topology inference uses frequency-aware section ranges so rare GPS/geofence artifacts do not distort `section_start/section_end`.
 - Tunables:
   - `TM_TOPOLOGY_MIN_FIXES_PER_SECTION` (default: 25)
-  - `TM_TOPOLOGY_RELIABLE_RANGE_PAD` (default: 2)
+  - `TM_TOPOLOGY_RELIABLE_RANGE_PAD` (default: 1)
 
 ### Step 3.6: Course Types Reference (Simple Dimension)
 

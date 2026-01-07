@@ -15,7 +15,7 @@ We have implemented a "Topology First" approach to handle the complex nature of 
     *   **Automated Discovery (data-driven):** `generate-topology` scans Silver telemetry and infers the course layout from **observed section ranges**. It does not assume “3 sections per hole” (tee/fairway/green); some holes contain 4+ sections in the telemetry.
     *   **Outlier-resistant boundaries:** Topology inference uses **frequency-aware section ranges** so that rare GPS/geofence artifacts do not distort `section_start/section_end`.
         *   Uses only section numbers with at least `TM_TOPOLOGY_MIN_FIXES_PER_SECTION` fixes (default: 25).
-        *   Applies a small pad (`TM_TOPOLOGY_RELIABLE_RANGE_PAD`, default: 2) so legitimate edge sections are retained.
+        *   Applies a small pad (`TM_TOPOLOGY_RELIABLE_RANGE_PAD`, default: 1) so legitimate edge sections are retained.
     *   **Two inference strategies (covers Bradshaw + standard 18-hole courses):**
         *   **Strategy A (hole numbers span 1..18 / 1..27):** derive units from hole-number bands (1–9, 10–18, 19–27) and compute `section_start/section_end` from min/max observed `section_number` for those holes.
         *   **Strategy B (hole numbers reset 1..9 per unit, common on 27-hole facilities):** scan `section_number` in order and detect “unit boundaries” where the dominant `hole_number` resets (e.g., 9 → 1). This avoids hardcoding “27 sections per nine”.

@@ -56,20 +56,30 @@ s3://tm-lakehouse-landing/
   "goalTime": 15840
 }
 ```
-# Todo: how were these validation rules determined? Do we have any empty columns for those fields?
 ## Validation Rules
 
-1. File must contain `_id` column/field
-2. File must contain `course` column/field
-3. File must have at least one `locations[0].startTime` entry
-4. File must have at least one data row/record
+**Minimal validation to preserve all data:**
+
+1. File must contain `_id` column/field (required for round identification)
+2. File must contain `course` column/field (required for partitioning)
+3. File must have at least one data row/record
+
+**What we DON'T require:**
+- ❌ `locations[0].startTime` - Not required (handled by Silver ETL)
+- ❌ `locations` array - Not required (empty rounds are valid)
+- ❌ Any specific location fields - All handled by Silver ETL
+
+**Why minimal validation?**
+- We want to preserve ALL data, including edge cases
+- Empty rounds, missing timestamps, NULL values are all valid
+- The Silver ETL handles missing fields and NULL values gracefully
 
 ## Data Quality
 
-- **No transformation** - data stored exactly as received
+- **No transformation** - Data stored exactly as received (byte-for-byte copy)
 # Todo: we need to make sure this checks properly
-- **Idempotent upload** - re-uploading same file skips if exists 
-- **Format detection** - automatic CSV vs JSON detection
+- **Idempotent upload** - Re-uploading same file skips if exists (prevents duplicates)
+- **Format detection** - Automatic CSV vs JSON detection based on extension/content
 
 ## Related Commands
 

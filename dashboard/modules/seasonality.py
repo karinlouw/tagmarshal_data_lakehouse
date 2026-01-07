@@ -5,12 +5,11 @@ peak periods and seasonal trends.
 """
 
 import streamlit as st
-import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 
 from utils.database import execute_query
 from utils import queries
+from utils.dbt_provenance import render_dbt_models_section
 from utils.colors import (
     COLOR_SEQUENCE,
     COLOR_MAP_DAY_TYPE,
@@ -171,9 +170,6 @@ def render():
                         )
                         st.caption(f"Total: {total_rounds:,} rounds")
 
-            with st.expander("SQL query"):
-                st.code(queries.ROUNDS_BY_MONTH, language="sql")
-
             with st.expander("View monthly data table"):
                 display_df = monthly_df[
                     ["course_id", "month_name", "rounds", "pct_total"]
@@ -307,9 +303,6 @@ def render():
             )
             st.plotly_chart(fig, use_container_width=True)
 
-            with st.expander("SQL query"):
-                st.code(queries.ROUNDS_BY_WEEKDAY, language="sql")
-
             with st.expander("View weekday data table"):
                 display_df = weekday_df[["course_id", "weekday_name", "rounds"]].copy()
                 st.dataframe(
@@ -370,3 +363,11 @@ def render():
                 )
     except Exception:
         pass
+
+    st.markdown("---")
+    render_dbt_models_section(
+        [
+            "course_rounds_by_month.sql",
+            "course_rounds_by_weekday.sql",
+        ]
+    )

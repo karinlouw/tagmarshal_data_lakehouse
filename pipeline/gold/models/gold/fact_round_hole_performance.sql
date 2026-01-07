@@ -30,7 +30,8 @@ WITH hole_stats AS (
         BOOL_OR(is_complete) AS round_was_completed
         
     FROM {{ source('silver', 'fact_telemetry_event') }}
-    WHERE hole_number IS NOT NULL
+    WHERE is_location_padding = FALSE
+      AND hole_number IS NOT NULL
     GROUP BY course_id, round_id, hole_number, nine_number
     ORDER BY round_id, hole_number, nine_number
 )

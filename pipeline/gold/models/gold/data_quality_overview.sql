@@ -38,6 +38,7 @@ WITH base AS (
         is_nine_hole,
         is_complete
     FROM {{ source('silver', 'fact_telemetry_event') }}
+    WHERE is_location_padding = FALSE
 ),
 
 course_stats AS (
@@ -82,6 +83,8 @@ course_stats AS (
     GROUP BY course_id
 )
 
+,
+final AS (
 SELECT
     course_id,
     total_events,
@@ -155,7 +158,13 @@ SELECT
           (100 - ((COALESCE(100.0 * null_battery / NULLIF(total_events, 0), 0) + COALESCE(100.0 * null_is_cache / NULLIF(total_events, 0), 0) + COALESCE(100.0 * timestamp_missing_flag / NULLIF(total_events, 0), 0)) / 3)) +
           (100 - ((COALESCE(100.0 * null_start_hole / NULLIF(total_events, 0), 0) + COALESCE(100.0 * null_is_nine_hole / NULLIF(total_events, 0), 0) + COALESCE(100.0 * null_is_complete / NULLIF(total_events, 0), 0)) / 3))
         ) / 4
-    , 1) AS overall_quality_score
+    , 1) AS data_quality_score
 
 FROM course_stats
-ORDER BY overall_quality_score ASC
+)
+SELECT
+  final.*,
+  -- Backward-compatible alias (older dashboards/queries may reference this name)
+  data_quality_score AS overall_quality_score
+FROM final
+ORDER BY data_quality_score ASC

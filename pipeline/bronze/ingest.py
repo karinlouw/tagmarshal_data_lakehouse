@@ -54,21 +54,28 @@ def detect_file_format(path: str) -> str:
 
 
 def validate_csv_header(path: str) -> None:
-    """Validate CSV has required columns (_id, course, locations[0].startTime)."""
+    """Validate CSV has minimal required columns (_id, course).
+
+    We only check for the absolute minimum required fields to preserve all data.
+    Missing locations, timestamps, or other fields are handled by the Silver ETL.
+    """
     with open(path, "r", newline="") as f:
         reader = csv.reader(f)
         header = next(reader)
+
     required = {"_id", "course"}
     missing = [c for c in required if c not in header]
     if missing:
         raise ValueError(f"CSV header missing required columns: {missing}")
-    if "locations[0].startTime" not in header:
-        raise ValueError("CSV header missing required column: locations[0].startTime")
 
 
 # Todo: Check how validation works
 def validate_json_structure(path: str) -> None:
-    """Validate JSON has required fields (_id, locations with startTime)."""
+    """Validate JSON has minimal required fields (_id, course).
+
+    We only check for the absolute minimum required fields to preserve all data.
+    Missing locations, timestamps, or other fields are handled by the Silver ETL.
+    """
     with open(path, "r") as f:
         data = json.load(f)
 
@@ -78,20 +85,16 @@ def validate_json_structure(path: str) -> None:
     if not rounds:
         raise ValueError("JSON file is empty")
 
-    # Check first round for required structure
+    # Check first round for minimal required structure
     first = rounds[0]
 
     # _id can be string or {"$oid": "..."} (MongoDB format)
     if "_id" not in first:
         raise ValueError("JSON missing required field: _id")
 
-    # locations must exist and have at least one entry with startTime
-    locations = first.get("locations", [])
-    if not locations:
-        raise ValueError("JSON missing required field: locations")
-
-    if "startTime" not in locations[0]:
-        raise ValueError("JSON locations[0] missing required field: startTime")
+    # course field is required
+    if "course" not in first:
+        raise ValueError("JSON missing required field: course")
 
 
 def count_csv_rows(path: str) -> int:
@@ -119,6 +122,37 @@ def bronze_object_key(course_id: str, ingest_date: str, filename: str) -> str:
     return f"course_id={course_id}/ingest_date={ingest_date}/{filename}"
 
 
+def _validate_ingest_date(ingest_date: str) -> None:
+    """Ensure ingest_date is ISO (YYYY-MM-DD)."""
+    try:
+        date.fromisoformat(ingest_date)
+    except Exception:
+        raise ValueError(f"Invalid ingest_date (expected YYYY-MM-DD): {ingest_date}")
+
+
+def _sample_course_from_csv(path: str) -> str | None:
+    """Sample first non-empty course value from CSV."""
+    with open(path, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            course_val = (row.get("course") or "").strip()
+            if course_val:
+                return course_val
+    return None
+
+
+def _sample_course_from_json(path: str) -> str | None:
+    """Sample course field from first JSON object."""
+    with open(path, "r") as f:
+        data = json.load(f)
+    rounds = data if isinstance(data, list) else [data]
+    for r in rounds:
+        course_val = (r.get("course") or "").strip() if isinstance(r, dict) else ""
+        if course_val:
+            return course_val
+    return None
+
+
 def upload_file_to_bronze(
     cfg: TMConfig,
     course_id: str,
@@ -126,12 +160,34 @@ def upload_file_to_bronze(
     ingest_date: str | None = None,
     skip_if_exists: bool = True,
 ) -> BronzeUploadResult:
-    """Upload CSV or JSON file to Landing Zone bucket with validation.
+    """Upload CSV or JSON file to Landing Zone bucket with minimal validation.
 
-    This is the main entry point - it auto-detects file format.
+    This function:
+    1. Detects file format (CSV or JSON)
+    2. Validates minimal required fields (_id, course)
+    3. Counts rows/rounds
+    4. Uploads file to S3 exactly as-is (no transformation, no filtering)
+
+    The file is uploaded completely unchanged - all rows, all columns, all NULL values
+    are preserved. The Silver ETL handles missing fields and NULL values.
+
+    Args:
+        cfg: Configuration object with S3 credentials and bucket names
+        course_id: Course identifier (e.g., "bradshawfarmgc")
+        local_path: Path to local CSV or JSON file
+        ingest_date: Date in YYYY-MM-DD format (defaults to today)
+        skip_if_exists: If True, skip upload if file already exists in S3
+
+    Returns:
+        BronzeUploadResult with upload details
+
+    Raises:
+        FileNotFoundError: If local file doesn't exist
+        ValueError: If validation fails or file has no data
     """
     if ingest_date is None:
         ingest_date = date.today().isoformat()
+    _validate_ingest_date(ingest_date)
 
     if not os.path.exists(local_path):
         raise FileNotFoundError(local_path)
@@ -139,12 +195,21 @@ def upload_file_to_bronze(
     # Detect format and validate
     file_format = detect_file_format(local_path)
 
+    sampled_course = None
+
     if file_format == "csv":
         validate_csv_header(local_path)
         row_count = count_csv_rows(local_path)
+        sampled_course = _sample_course_from_csv(local_path)
     else:
         validate_json_structure(local_path)
         row_count = count_json_rows(local_path)
+        sampled_course = _sample_course_from_json(local_path)
+
+    if sampled_course and sampled_course != course_id:
+        raise ValueError(
+            f"Course mismatch: file contains course '{sampled_course}' but parameter is '{course_id}'"
+        )
 
     if row_count <= 0:
         raise ValueError(f"{file_format.upper()} file has no data")

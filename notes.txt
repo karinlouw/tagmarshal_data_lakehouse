@@ -71,3 +71,11 @@ Can we start keeping record of the different types of courses? Just a simple tab
 We need to raise errors properly
 
 I need them to create and or validate the course_info table, inclduing the course type.
+
+try infering geometring fencing on one of the courses
+
+Do people every play 9 on indian creek or the other one? This is on the standard 18 hole
+
+Is there a scenarios where people play all 27 hokes in a round?
+
+Check dsequentiality of a round, in all the different way it starts.

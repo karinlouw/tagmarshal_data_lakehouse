@@ -59,6 +59,10 @@ def test_tmconfig_from_env(mock_env_vars):
     assert config.bucket_landing == "tm-lakehouse-landing-zone"
     assert config.s3_endpoint == "http://minio:9000"
     assert config.s3_force_path_style is True
+    assert config.coord_min_lon == -180
+    assert config.coord_max_lon == 180
+    assert config.coord_min_lat == -90
+    assert config.coord_max_lat == 90
 
 
 def test_tmconfig_missing_required_var_raises_error(monkeypatch):
@@ -104,4 +108,3 @@ def test_tmconfig_frozen_dataclass(sample_config):
     """Test that TMConfig is frozen (immutable)."""
     with pytest.raises(Exception):  # Frozen dataclass raises FrozenInstanceError
         sample_config.env = "aws"  # type: ignore
-

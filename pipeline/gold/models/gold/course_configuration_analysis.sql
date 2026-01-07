@@ -21,7 +21,9 @@ WITH round_configs AS (
         COUNT(DISTINCT nine_number) AS nines_played,
         COUNT(*) AS location_count
     FROM {{ source('silver', 'fact_telemetry_event') }}
-    WHERE hole_number IS NOT NULL
+    WHERE is_location_padding = FALSE
+      -- Note: we do NOT require hole_number here. We want to keep rounds/events
+      -- even when hole assignment is missing, so totals reflect the full dataset.
     GROUP BY course_id, round_id, start_hole, is_nine_hole, is_complete
 ),
 
