@@ -8,7 +8,7 @@
 
 {{ config(
     materialized='table',
-    partition_by=['course_id']
+    post_hook=tm_iceberg_partitioning_course_id_post_hook()
 ) }}
 
 WITH rounds AS (

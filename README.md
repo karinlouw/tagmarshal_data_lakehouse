@@ -84,7 +84,7 @@ This ensures you can join `fact_telemetry_event` with `dim_facility_topology` to
 **One-shot refresh (recommended):**
 
 ```bash
-just topology-refresh
+just topology
 ```
 
 **Outlier-resistant topology boundaries:**

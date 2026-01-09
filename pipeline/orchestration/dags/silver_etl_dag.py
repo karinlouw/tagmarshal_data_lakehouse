@@ -133,16 +133,28 @@ def run_spark_etl(**context):
         "-e",
         f"TM_BUCKET_SOURCE={cfg.bucket_source}",
         "-e",
+        f"TM_BUCKET_SERVE={cfg.bucket_serve}",
+        "-e",
         f"TM_BUCKET_QUARANTINE={cfg.bucket_quarantine}",
         "-e",
         f"TM_BUCKET_OBSERVABILITY={cfg.bucket_observability}",
         "-e",
         f"TM_ICEBERG_WAREHOUSE_SILVER={cfg.iceberg_warehouse_silver}",
         "-e",
+        f"TM_ICEBERG_WAREHOUSE_GOLD={cfg.iceberg_warehouse_gold}",
+        "-e",
         f"TM_DB_SILVER={cfg.db_silver}",
         "-e",
+        f"TM_DB_GOLD={cfg.db_gold}",
+        "-e",
         f"TM_S3_REGION={cfg.s3_region}",
+        "-e",
+        f"TM_S3_FORCE_PATH_STYLE={str(cfg.s3_force_path_style).lower()}",
+        "-e",
+        f"TM_ICEBERG_CATALOG_TYPE={cfg.iceberg_catalog_type}",
     ]
+    if cfg.iceberg_rest_uri:
+        docker_env += ["-e", f"TM_ICEBERG_REST_URI={cfg.iceberg_rest_uri}"]
     if cfg.s3_endpoint:
         docker_env += ["-e", f"TM_S3_ENDPOINT={cfg.s3_endpoint}"]
     if cfg.s3_access_key:
@@ -297,6 +309,91 @@ def run_spark_etl(**context):
     return {"course_id": course_id, "status": "success", "rows": rows_processed}
 
 
+def refresh_topology_dimension(**context):
+    """
+    Optional post-step: refresh dim_facility_topology from Silver telemetry.
+
+    This is OFF by default because it scans the full Silver telemetry table.
+    Enable via:
+    - DAG trigger conf: {"refresh_topology": true}
+    - or env var: TM_REFRESH_TOPOLOGY_AFTER_SILVER=true
+    """
+    run_conf = (context.get("dag_run").conf or {}) if context.get("dag_run") else {}
+    enabled = bool(run_conf.get("refresh_topology")) or (
+        os.getenv("TM_REFRESH_TOPOLOGY_AFTER_SILVER", "false").lower() == "true"
+    )
+
+    if not enabled:
+        print("ℹ️  Skipping topology refresh (refresh_topology not enabled).")
+        return {"skipped": True}
+
+    cfg = TMConfig.from_env()
+
+    print(f"\n{'='*60}")
+    print("🧩 TOPOLOGY REFRESH (optional)")
+    print(f"{'='*60}")
+    print("  Action: Upsert iceberg.silver.dim_facility_topology from Silver telemetry")
+    print("  Note: Preserves existing non-empty unit_name values")
+    print("")
+
+    docker_env = [
+        "-e",
+        f"AWS_REGION={cfg.s3_region}",
+        "-e",
+        f"TM_BUCKET_LANDING={cfg.bucket_landing}",
+        "-e",
+        f"TM_BUCKET_SOURCE={cfg.bucket_source}",
+        "-e",
+        f"TM_BUCKET_QUARANTINE={cfg.bucket_quarantine}",
+        "-e",
+        f"TM_BUCKET_OBSERVABILITY={cfg.bucket_observability}",
+        "-e",
+        f"TM_ICEBERG_WAREHOUSE_SILVER={cfg.iceberg_warehouse_silver}",
+        "-e",
+        f"TM_DB_SILVER={cfg.db_silver}",
+        "-e",
+        f"TM_S3_REGION={cfg.s3_region}",
+        "-e",
+        f"TM_ICEBERG_CATALOG_TYPE={cfg.iceberg_catalog_type}",
+    ]
+    if cfg.iceberg_rest_uri:
+        docker_env += ["-e", f"TM_ICEBERG_REST_URI={cfg.iceberg_rest_uri}"]
+    if cfg.s3_endpoint:
+        docker_env += ["-e", f"TM_S3_ENDPOINT={cfg.s3_endpoint}"]
+    if cfg.s3_access_key:
+        docker_env += ["-e", f"TM_S3_ACCESS_KEY={cfg.s3_access_key}"]
+    if cfg.s3_secret_key:
+        docker_env += ["-e", f"TM_S3_SECRET_KEY={cfg.s3_secret_key}"]
+    docker_env += [
+        "-e",
+        f"TM_S3_FORCE_PATH_STYLE={str(cfg.s3_force_path_style).lower()}",
+    ]
+
+    cmd = [
+        "docker",
+        "exec",
+        *docker_env,
+        "spark",
+        "/opt/spark/bin/spark-submit",
+        "--master",
+        SPARK_CONFIG["master"],
+        "/opt/tagmarshal/pipeline/scripts/dimensions.py",
+        "generate-topology",
+        "--output-table",
+        "iceberg.silver.dim_facility_topology",
+        "--preserve-unit-names",
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.stdout:
+        print(result.stdout)
+    if result.returncode != 0:
+        print(result.stderr)
+        raise RuntimeError("Topology refresh failed")
+
+    return {"skipped": False, "table": "iceberg.silver.dim_facility_topology"}
+
+
 with DAG(
     dag_id="silver_etl",
     start_date=datetime(2025, 1, 1),
@@ -324,7 +421,14 @@ Transforms Landing Zone CSV into Silver Iceberg table (long format).
 - MinIO: http://localhost:9001/browser/tm-lakehouse-source-store/warehouse/silver/
 """,
 ):
-    PythonOperator(
+    etl = PythonOperator(
         task_id="spark_silver_etl",
         python_callable=run_spark_etl,
     )
+
+    refresh_topology = PythonOperator(
+        task_id="refresh_topology_dimension",
+        python_callable=refresh_topology_dimension,
+    )
+
+    etl >> refresh_topology

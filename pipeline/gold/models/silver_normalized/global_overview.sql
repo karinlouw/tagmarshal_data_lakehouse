@@ -5,6 +5,8 @@
 --   Global KPI summary across all Silver telemetry. This is ideal for demos
 --   to show "everything is accessible in one place" without jumping between
 --   many tables.
+--
+-- NOTE: All timestamps are standardized to UTC for global cross-course analysis.
 -- -----------------------------------------------------------------------------
 
 {{ config(materialized='table') }}
@@ -15,6 +17,8 @@ WITH base AS (
         round_id,
         device AS device_id,
         fix_timestamp,
+        -- Convert to UTC for standardized global analysis
+        fix_timestamp AT TIME ZONE 'UTC' AS fix_timestamp_utc,
         is_timestamp_missing,
         is_location_padding,
         is_problem,
@@ -48,8 +52,8 @@ agg AS (
         COUNT(DISTINCT CASE WHEN NOT is_location_padding AND COALESCE(is_secondary, FALSE) THEN round_id END) AS secondary_rounds,
         COUNT(DISTINCT CASE WHEN NOT is_location_padding AND COALESCE(is_auto_assigned, FALSE) THEN round_id END) AS auto_assigned_rounds,
 
-        MIN(fix_timestamp) AS first_fix_ts,
-        MAX(fix_timestamp) AS last_fix_ts,
+        MIN(fix_timestamp_utc) AS first_fix_ts,
+        MAX(fix_timestamp_utc) AS last_fix_ts,
 
         AVG(pace_gap) FILTER (WHERE NOT is_location_padding) AS avg_pace_gap_sec,
         APPROX_PERCENTILE(pace_gap, 0.5) FILTER (WHERE NOT is_location_padding) AS median_pace_gap_sec

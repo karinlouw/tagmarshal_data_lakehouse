@@ -1,16 +1,15 @@
 {{ config(
     materialized='table',
-    partition_by=['course_id']
+    post_hook=tm_iceberg_partitioning_course_id_post_hook()
 ) }}
 
 WITH round_starts AS (
+    -- Use fact_rounds to avoid a second scan of fix-grain telemetry.
     SELECT
         course_id,
         round_id,
-        MIN(fix_timestamp) AS round_start_time
-    FROM {{ source('silver', 'fact_telemetry_event') }}
-    WHERE is_location_padding = FALSE
-    GROUP BY course_id, round_id
+        round_start_ts AS round_start_time
+    FROM {{ ref('fact_rounds') }}
 ),
 rounds_with_month_keys AS (
     SELECT

@@ -460,9 +460,13 @@ dashboard-install:
   echo ""
   echo "📦 INSTALLING DASHBOARD DEPENDENCIES"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  # Use a local virtualenv (macOS Homebrew Python is PEP 668 "externally managed").
+  python3 -m venv .venv-dashboard
+  source .venv-dashboard/bin/activate
+  python -m pip install --upgrade pip
   pip install -r dashboard/requirements.txt
   echo ""
-  echo "✅ Dependencies installed!"
+  echo "✅ Dependencies installed in .venv-dashboard!"
 
 # Run the Streamlit data quality dashboard
 dashboard:
@@ -479,6 +483,7 @@ dashboard:
   echo "  Opening dashboard at http://localhost:8501"
   echo "  Press Ctrl+C to stop"
   echo ""
+  source .venv-dashboard/bin/activate
   STREAMLIT_TELEMETRY=false streamlit run dashboard/app.py --server.port 8501 --server.headless true --theme.base light
 
 # Run dashboard in background
@@ -488,6 +493,7 @@ dashboard-bg:
   echo ""
   echo "📊 STARTING DASHBOARD (BACKGROUND)"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  source .venv-dashboard/bin/activate
   STREAMLIT_TELEMETRY=false nohup streamlit run dashboard/app.py --server.port 8501 --server.headless true --theme.base light > /tmp/streamlit.log 2>&1 &
   echo ""
   echo "✅ Dashboard started in background"
@@ -1040,11 +1046,7 @@ silver-all ingest_date="":
   echo ""
   echo "  💡 Config: TM_PIPELINE_MODE=$PIPELINE_MODE (config/local.env)"
   echo ""
-  
-  # Auto-generate topology
-  just generate-topology
-  # Upload and seed topology table
-  just seed-topology
+  echo "  💡 Next: run 'just topology' to generate + seed the topology table"
 
 # Generate topology mapping from processed data
 generate-topology:
@@ -1058,8 +1060,39 @@ generate-topology:
   
   # Run generator in Spark container and capture output to tmp file
   echo "  ⏳ Analyzing Silver data..."
-  # Use spark-submit so PySpark is available (plain `python3` may not have pyspark on PYTHONPATH)
-  docker exec spark /opt/spark/bin/spark-submit --master local[2] /opt/tagmarshal/pipeline/scripts/generate_topology.py --output /tmp/topology.csv 2>&1 | grep -v "NativeCodeLoader\\|SLF4J\\|MetricsConfig" || true
+  # Use spark-submit so PySpark is available, and include required Iceberg + S3A JARs on the classpath
+  JARS="/opt/spark/extra-jars/iceberg-spark-runtime-3.5_2.12-1.4.3.jar,/opt/spark/extra-jars/aws-java-sdk-bundle-1.12.262.jar,/opt/spark/extra-jars/hadoop-aws-3.3.4.jar,/opt/spark/extra-jars/bundle-2.20.18.jar"
+  REGION=$(grep "^TM_S3_REGION=" config/local.env 2>/dev/null | cut -d= -f2 || echo "us-east-1")
+  ACCESS=$(grep "^TM_S3_ACCESS_KEY=" config/local.env 2>/dev/null | cut -d= -f2 || echo "minioadmin")
+  SECRET=$(grep "^TM_S3_SECRET_KEY=" config/local.env 2>/dev/null | cut -d= -f2 || echo "minioadmin")
+  ENDPOINT=$(grep "^TM_S3_ENDPOINT=" config/local.env 2>/dev/null | cut -d= -f2 || echo "http://minio:9000")
+  docker exec \
+    -e AWS_REGION="$REGION" \
+    -e AWS_ACCESS_KEY_ID="$ACCESS" \
+    -e AWS_SECRET_ACCESS_KEY="$SECRET" \
+    -e TM_S3_REGION="$REGION" \
+    -e TM_S3_ACCESS_KEY="$ACCESS" \
+    -e TM_S3_SECRET_KEY="$SECRET" \
+    -e TM_S3_ENDPOINT="$ENDPOINT" \
+    spark \
+    /opt/spark/bin/spark-submit --master local[2] \
+    --conf "spark.driver.extraJavaOptions=-Daws.region=$REGION" \
+    --conf "spark.executor.extraJavaOptions=-Daws.region=$REGION" \
+    --jars "$JARS" \
+    /opt/tagmarshal/pipeline/scripts/dimensions.py generate-topology --output-csv /tmp/topology.csv \
+    2>&1 \
+    | awk '
+        BEGIN { skip = 0 }
+        /RESTMetricsReporter: Failed to report metrics to REST endpoint/ { skip = 1; next }
+        skip == 1 {
+          if ($0 ~ /^org\\.apache\\.iceberg\\.exceptions\\.RESTException:/) next
+          if ($0 ~ /^Caused by:/) next
+          if ($0 ~ /^[[:space:]]+at /) next
+          skip = 0
+        }
+        { print }
+      ' \
+    | grep -v "NativeCodeLoader\\|SLF4J\\|MetricsConfig" || true
 
   # Copy result back to host
   echo "  📥 Updating local topology file..."
@@ -1070,12 +1103,126 @@ generate-topology:
   echo "  💡 You can now edit this file to rename units (e.g. 'Unit 1' → 'Red Course')"
   echo ""
 
-# One-shot helper: regenerate + seed topology
-topology-refresh:
+# Generate + seed topology in one command
+topology:
   #!/usr/bin/env bash
   set -euo pipefail
+  
+  # Fail fast if Silver table doesn't exist yet
+  if ! docker exec trino trino --execute "SELECT 1 FROM iceberg.silver.fact_telemetry_event LIMIT 1" >/dev/null 2>&1; then
+    echo ""
+    echo "❌ Silver table not found: iceberg.silver.fact_telemetry_event"
+    echo "💡 Run 'just silver-all' first, then rerun: just topology"
+    echo ""
+    exit 1
+  fi
+  
   just generate-topology
   just seed-topology
+
+
+# Generate sections-per-hole dimension table from Silver data
+generate-sections-per-hole:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  
+  echo ""
+  echo "🔢 GENERATING SECTIONS PER HOLE DIMENSION"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  
+  # Load environment variables from config files
+  # Source base.env first, then local.env (local overrides base)
+  set -a
+  [ -f config/base.env ] && source config/base.env
+  [ -f config/local.env ] && source config/local.env
+  set +a
+
+  # Normalize required config so we don't accidentally pass empty env vars into the container.
+  # (TMConfig fails fast on missing/empty env vars.)
+  : "${TM_BUCKET_LANDING:=tm-lakehouse-landing-zone}"
+  : "${TM_BUCKET_SOURCE:=tm-lakehouse-source-store}"
+  : "${TM_BUCKET_SERVE:=tm-lakehouse-serve}"
+  : "${TM_BUCKET_QUARANTINE:=tm-lakehouse-quarantine}"
+  : "${TM_BUCKET_OBSERVABILITY:=tm-lakehouse-observability}"
+  : "${TM_DB_SILVER:=silver}"
+  : "${TM_DB_GOLD:=gold}"
+  : "${TM_ICEBERG_WAREHOUSE_SILVER:=s3://${TM_BUCKET_SOURCE}/warehouse}"
+  : "${TM_ICEBERG_WAREHOUSE_GOLD:=s3://${TM_BUCKET_SERVE}/warehouse}"
+  : "${TM_S3_REGION:=us-east-1}"
+  : "${TM_S3_ENDPOINT:=http://minio:9000}"
+  : "${TM_S3_ACCESS_KEY:=minioadmin}"
+  : "${TM_S3_SECRET_KEY:=minioadmin}"
+  : "${TM_S3_FORCE_PATH_STYLE:=true}"
+  : "${TM_ICEBERG_CATALOG_TYPE:=rest}"
+  : "${TM_ICEBERG_REST_URI:=http://iceberg-rest:8181}"
+  : "${TM_LOCAL_INPUT_DIR:=/opt/tagmarshal/input}"
+  : "${TM_DATA_SOURCE:=file}"
+  : "${TM_ENV:=local}"
+  
+  # Run generator in Spark container with environment variables
+  echo "  ⏳ Analyzing Silver telemetry data..."
+  LOG_FILE="$(mktemp -t sections-per-hole.XXXXXX.log)"
+  trap 'rm -f "$LOG_FILE"' EXIT
+
+  if ! docker exec \
+    -e AWS_REGION="$TM_S3_REGION" \
+    -e AWS_DEFAULT_REGION="$TM_S3_REGION" \
+    -e AWS_ACCESS_KEY_ID="$TM_S3_ACCESS_KEY" \
+    -e AWS_SECRET_ACCESS_KEY="$TM_S3_SECRET_KEY" \
+    -e TM_BUCKET_LANDING="$TM_BUCKET_LANDING" \
+    -e TM_BUCKET_SOURCE="$TM_BUCKET_SOURCE" \
+    -e TM_BUCKET_SERVE="$TM_BUCKET_SERVE" \
+    -e TM_BUCKET_QUARANTINE="$TM_BUCKET_QUARANTINE" \
+    -e TM_BUCKET_OBSERVABILITY="$TM_BUCKET_OBSERVABILITY" \
+    -e TM_ICEBERG_CATALOG_TYPE="$TM_ICEBERG_CATALOG_TYPE" \
+    -e TM_ICEBERG_CATALOG_NAME="${TM_ICEBERG_CATALOG_NAME:-iceberg}" \
+    -e TM_ICEBERG_CATALOG_URI="${TM_ICEBERG_CATALOG_URI:-}" \
+    -e TM_ICEBERG_REST_URI="${TM_ICEBERG_REST_URI:-}" \
+    -e TM_ICEBERG_WAREHOUSE_SILVER="$TM_ICEBERG_WAREHOUSE_SILVER" \
+    -e TM_ICEBERG_WAREHOUSE_GOLD="$TM_ICEBERG_WAREHOUSE_GOLD" \
+    -e TM_DB_SILVER="$TM_DB_SILVER" \
+    -e TM_DB_GOLD="$TM_DB_GOLD" \
+    -e TM_S3_REGION="$TM_S3_REGION" \
+    -e TM_S3_ENDPOINT="$TM_S3_ENDPOINT" \
+    -e TM_S3_ACCESS_KEY="$TM_S3_ACCESS_KEY" \
+    -e TM_S3_SECRET_KEY="$TM_S3_SECRET_KEY" \
+    -e TM_S3_FORCE_PATH_STYLE="$TM_S3_FORCE_PATH_STYLE" \
+    -e TM_LOCAL_INPUT_DIR="$TM_LOCAL_INPUT_DIR" \
+    -e TM_DATA_SOURCE="$TM_DATA_SOURCE" \
+    -e TM_ENV="$TM_ENV" \
+    spark \
+    /opt/spark/bin/spark-submit \
+    --master local[2] \
+    --conf "spark.driver.extraJavaOptions=-Daws.region=$TM_S3_REGION" \
+    --conf "spark.executor.extraJavaOptions=-Daws.region=$TM_S3_REGION" \
+    --jars "/opt/spark/extra-jars/hadoop-aws-3.3.4.jar,/opt/spark/extra-jars/aws-java-sdk-bundle-1.12.262.jar,/opt/spark/extra-jars/iceberg-spark-runtime-3.5_2.12-1.4.3.jar,/opt/spark/extra-jars/bundle-2.20.18.jar,/opt/spark/extra-jars/wildfly-openssl-1.0.7.Final.jar,/opt/spark/extra-jars/eventstream-1.0.1.jar" \
+    /opt/tagmarshal/pipeline/scripts/generate_sections_per_hole.py \
+    >"$LOG_FILE" 2>&1; then
+    echo ""
+    echo "  ❌ Failed to generate sections-per-hole dimension."
+    echo "  (tail of Spark output)"
+    echo ""
+    tail -200 "$LOG_FILE" | grep -v "NativeCodeLoader\\|SLF4J\\|MetricsConfig" || true
+    echo ""
+    exit 1
+  fi
+
+  # Print a small, readable tail for humans (but do NOT mask failures).
+  tail -120 "$LOG_FILE" | grep -v "NativeCodeLoader\\|SLF4J\\|MetricsConfig" || true
+
+  # Sanity check: table should exist and be queryable in Trino.
+  if ! docker exec trino trino --execute "SELECT count(*) FROM iceberg.silver.dim_sections_per_hole" >/dev/null 2>&1; then
+    echo ""
+    echo "  ❌ Spark job succeeded but table is not queryable in Trino:"
+    echo "     iceberg.silver.dim_sections_per_hole"
+    echo ""
+    exit 1
+  fi
+  
+  echo ""
+  echo "  ✅ Sections-per-hole dimension table created: iceberg.silver.dim_sections_per_hole"
+  echo ""
 
 # Seed the topology data into an Iceberg table (for Trino/DBeaver visibility)
 seed-topology:
@@ -1094,7 +1241,7 @@ seed-topology:
   # 2. Run Spark job to load it into Iceberg
   echo "  ❄️  Loading into Iceberg table (iceberg.silver.dim_facility_topology)..."
   # Use spark-submit so PySpark is available, and include required Iceberg + S3A JARs on the classpath
-  JARS="/opt/spark/extra-jars/iceberg-spark-runtime-3.5_2.12-1.4.3.jar,/opt/spark/extra-jars/aws-java-sdk-bundle-1.12.262.jar,/opt/spark/extra-jars/hadoop-aws-3.3.4.jar,/opt/spark/extra-jars/bundle-2.20.18.jar,/opt/spark/extra-jars/url-connection-client-2.20.18.jar"
+  JARS="/opt/spark/extra-jars/iceberg-spark-runtime-3.5_2.12-1.4.3.jar,/opt/spark/extra-jars/aws-java-sdk-bundle-1.12.262.jar,/opt/spark/extra-jars/hadoop-aws-3.3.4.jar,/opt/spark/extra-jars/bundle-2.20.18.jar"
   REGION=$(grep "^TM_S3_REGION=" config/local.env 2>/dev/null | cut -d= -f2 || echo "us-east-1")
   ACCESS=$(grep "^TM_S3_ACCESS_KEY=" config/local.env 2>/dev/null | cut -d= -f2 || echo "minioadmin")
   SECRET=$(grep "^TM_S3_SECRET_KEY=" config/local.env 2>/dev/null | cut -d= -f2 || echo "minioadmin")
@@ -1112,7 +1259,20 @@ seed-topology:
     --conf "spark.driver.extraJavaOptions=-Daws.region=$REGION" \
     --conf "spark.executor.extraJavaOptions=-Daws.region=$REGION" \
     --jars "$JARS" \
-    /opt/tagmarshal/pipeline/scripts/seed_topology.py
+    /opt/tagmarshal/pipeline/scripts/dimensions.py seed-topology \
+    2>&1 \
+    | awk '
+        BEGIN { skip = 0 }
+        /RESTMetricsReporter: Failed to report metrics to REST endpoint/ { skip = 1; next }
+        skip == 1 {
+          if ($0 ~ /^org\\.apache\\.iceberg\\.exceptions\\.RESTException:/) next
+          if ($0 ~ /^Caused by:/) next
+          if ($0 ~ /^[[:space:]]+at /) next
+          skip = 0
+        }
+        { print }
+      ' \
+    | grep -v "NativeCodeLoader\\|SLF4J\\|MetricsConfig" || true
 
   echo ""
   echo "  ✅ Seeding complete"
@@ -1136,7 +1296,7 @@ seed-course-profile:
   # 2. Run Spark job to load it into Iceberg (MERGE / upsert)
   echo "  ❄️  Loading into Iceberg table (iceberg.silver.dim_course_profile)..."
   # Use spark-submit so PySpark is available, and include required Iceberg + S3A JARs on the classpath
-  JARS="/opt/spark/extra-jars/iceberg-spark-runtime-3.5_2.12-1.4.3.jar,/opt/spark/extra-jars/aws-java-sdk-bundle-1.12.262.jar,/opt/spark/extra-jars/hadoop-aws-3.3.4.jar,/opt/spark/extra-jars/bundle-2.20.18.jar,/opt/spark/extra-jars/url-connection-client-2.20.18.jar"
+  JARS="/opt/spark/extra-jars/iceberg-spark-runtime-3.5_2.12-1.4.3.jar,/opt/spark/extra-jars/aws-java-sdk-bundle-1.12.262.jar,/opt/spark/extra-jars/hadoop-aws-3.3.4.jar,/opt/spark/extra-jars/bundle-2.20.18.jar"
   REGION=$(grep "^TM_S3_REGION=" config/local.env 2>/dev/null | cut -d= -f2 || echo "us-east-1")
   ACCESS=$(grep "^TM_S3_ACCESS_KEY=" config/local.env 2>/dev/null | cut -d= -f2 || echo "minioadmin")
   SECRET=$(grep "^TM_S3_SECRET_KEY=" config/local.env 2>/dev/null | cut -d= -f2 || echo "minioadmin")
@@ -1154,7 +1314,20 @@ seed-course-profile:
     --conf "spark.driver.extraJavaOptions=-Daws.region=$REGION" \
     --conf "spark.executor.extraJavaOptions=-Daws.region=$REGION" \
     --jars "$JARS" \
-    /opt/tagmarshal/pipeline/scripts/seed_course_profile.py
+    /opt/tagmarshal/pipeline/scripts/dimensions.py seed-course-profile \
+    2>&1 \
+    | awk '
+        BEGIN { skip = 0 }
+        /RESTMetricsReporter: Failed to report metrics to REST endpoint/ { skip = 1; next }
+        skip == 1 {
+          if ($0 ~ /^org\\.apache\\.iceberg\\.exceptions\\.RESTException:/) next
+          if ($0 ~ /^Caused by:/) next
+          if ($0 ~ /^[[:space:]]+at /) next
+          skip = 0
+        }
+        { print }
+      ' \
+    | grep -v "NativeCodeLoader\\|SLF4J\\|MetricsConfig" || true
 
   echo ""
   echo "  ✅ Seeding complete"
@@ -1171,13 +1344,27 @@ gold:
   echo "🏆 GOLD DBT MODELS"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo ""
+  
+  # Generate Silver dimension tables first (required for Gold models)
+  echo "  📊 Generating Silver dimension tables..."
+  just generate-sections-per-hole
+  echo ""
+  
   echo "  Models to build:"
+  echo "    • gold.fact_rounds"
+  echo "    • gold.fact_round_hole_performance"
+  echo "    • gold.dim_course"
   echo "    • gold.pace_summary_by_round"
   echo "    • gold.signal_quality_rounds"
   echo "    • gold.device_health_errors"
   echo "    • gold.course_configuration_analysis"
-  echo "    • gold.critical_column_gaps"
+  echo "    • gold.course_start_hole_distribution"
+  echo "    • gold.course_rounds_by_month"
+  echo "    • gold.course_rounds_by_weekday"
+  echo "    • gold.telemetry_completeness_summary"
   echo "    • gold.data_quality_overview"
+  echo "    • gold.critical_column_gaps"
+  echo "    • gold.gold_coverage_audit"
   echo ""
   
   START_TIME=$(date +%s)
@@ -1231,7 +1418,7 @@ gold:
   
   # Show row counts for gold tables
   echo "  📈 Gold Table Row Counts:"
-  for table in pace_summary_by_round signal_quality_rounds device_health_errors course_configuration_analysis critical_column_gaps data_quality_overview; do
+  for table in fact_rounds fact_round_hole_performance dim_course pace_summary_by_round signal_quality_rounds device_health_errors course_configuration_analysis course_start_hole_distribution course_rounds_by_month course_rounds_by_weekday telemetry_completeness_summary data_quality_overview critical_column_gaps gold_coverage_audit; do
     ROWS=$(docker exec trino trino --execute \
       "SELECT count(*) FROM iceberg.gold.$table" 2>&1 | grep -v "jline\|WARNING" | tr -d '"' || echo "0")
     echo "     $table: $ROWS rows"

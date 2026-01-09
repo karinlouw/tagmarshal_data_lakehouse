@@ -6,11 +6,13 @@
 --   using only signals we actually have: fix timestamps + is_problem + pace_gap.
 --
 -- time_bucket:
---   - 'morning'   = 05:00–11:59
---   - 'afternoon' = 12:00–17:59
---   - 'evening'   = 18:00–23:59
---   - 'night'     = 00:00–04:59
+--   - 'morning'   = 05:00–11:59 UTC
+--   - 'afternoon' = 12:00–17:59 UTC
+--   - 'evening'   = 18:00–23:59 UTC
+--   - 'night'     = 00:00–04:59 UTC
 --   - 'unknown'   = missing timestamps
+--
+-- NOTE: All timestamps are standardized to UTC for global cross-course analysis.
 -- -----------------------------------------------------------------------------
 
 {{ config(materialized='table') }}
@@ -20,6 +22,8 @@ WITH fixes AS (
         course_id,
         round_id,
         fix_timestamp,
+        -- Convert to UTC for standardized global analysis
+        fix_timestamp AT TIME ZONE 'UTC' AS fix_timestamp_utc,
         is_timestamp_missing,
         is_location_padding,
         is_problem,
@@ -39,19 +43,19 @@ bucketed AS (
         pace_gap,
         CASE
             WHEN fix_timestamp IS NULL THEN 'unknown'
-            WHEN hour(fix_timestamp) BETWEEN 5 AND 11 THEN 'morning'
-            WHEN hour(fix_timestamp) BETWEEN 12 AND 17 THEN 'afternoon'
-            WHEN hour(fix_timestamp) BETWEEN 18 AND 23 THEN 'evening'
+            WHEN hour(fix_timestamp_utc) BETWEEN 5 AND 11 THEN 'morning'
+            WHEN hour(fix_timestamp_utc) BETWEEN 12 AND 17 THEN 'afternoon'
+            WHEN hour(fix_timestamp_utc) BETWEEN 18 AND 23 THEN 'evening'
             ELSE 'night'
         END AS time_bucket,
         CASE
             WHEN fix_timestamp IS NULL THEN 'unknown'
-            WHEN day_of_week(fix_timestamp) IN (6, 7) THEN 'weekend'
+            WHEN day_of_week(fix_timestamp_utc) IN (6, 7) THEN 'weekend'
             ELSE 'weekday'
         END AS day_type,
         CASE
             WHEN fix_timestamp IS NULL THEN NULL
-            ELSE hour(fix_timestamp)
+            ELSE hour(fix_timestamp_utc)
         END AS hour_of_day
     FROM fixes
 ),

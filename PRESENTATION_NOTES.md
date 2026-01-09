@@ -25,11 +25,11 @@ We have implemented a "Topology First" approach to handle the complex nature of 
         *   Otherwise use the inferred topology join.
 
 ## 2.5 Course Types Reference (Simple Dimension)
-We maintain a simple, queryable record of “course types” for pilot/demo communication and downstream logic.
+We maintain a simple, queryable record of "course types" for pilot/demo communication and downstream logic.
 
 *   **Seed file:** `pipeline/silver/seeds/dim_course_profile.csv`
 *   **Iceberg table:** `iceberg.silver.dim_course_profile`
-*   **Command:** `just seed-course-profile`
+*   **Command:** `just seed-course-profile` (uses `dimensions.py seed-course-profile`)
 
 ## 2.6 Seasonality (Inferred From Telemetry)
 We infer seasonality from the data by counting rounds by:
@@ -89,8 +89,8 @@ Files in `/data/`         -> bronze_ingest_dag (Justfile bronze-upload*)
                              ↓
                          spark ETL
                            (just silver / silver_etl_dag)
-  • `generate_topology.py` -> analyzes Silver data -> writes `dim_facility_topology.csv`
-  • `seed_topology.py`     -> uploads CSV to MinIO & writes Iceberg `dim_facility_topology`
+  • `dimensions.py generate-topology` -> analyzes Silver data -> writes `dim_facility_topology.csv` and/or upserts Iceberg table
+  • `dimensions.py seed-topology`     -> uploads CSV to MinIO & writes Iceberg `dim_facility_topology`
                            ↓
                          Silver table (`fact_telemetry_event`)
                              ↓

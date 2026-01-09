@@ -1,851 +1,1621 @@
 """SQL queries for the data quality dashboard.
 
-Each query includes a description explaining what it does.
-Queries are organised by dashboard page.
+All queries target the Silver layer directly to avoid dependencies on
+Gold dbt models. This makes the dashboard more reliable and easier to debug.
 """
 
 # =============================================================================
-# Executive / Data quality page queries
+# OVERVIEW QUERIES
 # =============================================================================
 
-EXECUTIVE_SUMMARY = """
--- Executive summary: total courses, rounds, and events
--- - Courses + rounds come from the canonical Gold rounds fact (1 row per round)
--- - Events come from Silver non-padding telemetry (real fixes only)
-WITH gold AS (
+OVERVIEW_STATS = """
+-- High-level statistics from Silver telemetry
     SELECT
         COUNT(DISTINCT course_id) AS total_courses,
-        COUNT(*) AS total_rounds
-    FROM iceberg.gold.fact_rounds
-),
-silver AS (
-SELECT 
-        COUNT(*) AS total_events
+    COUNT(DISTINCT round_id) AS total_rounds,
+    COUNT(*) AS total_events,
+    SUM(CASE WHEN is_location_padding = FALSE THEN 1 ELSE 0 END) AS real_events,
+    MIN(event_date) AS earliest_date,
+    MAX(event_date) AS latest_date
 FROM iceberg.silver.fact_telemetry_event
-    WHERE is_location_padding = FALSE
-)
-SELECT
-    gold.total_courses,
-    gold.total_rounds,
-    silver.total_events
-FROM gold
-CROSS JOIN silver
 """
 
-DATA_QUALITY_OVERVIEW = """
--- Data quality overview by course
--- Shows completeness percentages and overall quality score
+COURSE_SUMMARY = """
+-- Summary statistics per course
 SELECT
     course_id,
-    total_events,
-    total_rounds,
-    pct_missing_pace,
-    pct_missing_pace_gap,
-    pct_missing_hole,
-    pct_missing_section,
-    pct_missing_coords,
-    pct_missing_timestamp,
-    pct_missing_battery,
-    pct_missing_cache_flag,
-    pct_missing_start_hole,
-    pct_missing_nine_hole_flag,
-    pct_missing_complete_flag,
-    pct_problem_events,
-    pct_projected_events,
-    pct_low_battery,
-    data_quality_score
-FROM iceberg.gold.data_quality_overview
-ORDER BY data_quality_score DESC
-"""
-
-CRITICAL_COLUMN_GAPS = """
--- Critical column gaps by tier
--- Tier 1: Pace (essential), Tier 2: Location, Tier 3: Device, Tier 4: Config
-SELECT
-    course_id,
-    total_events,
-    total_rounds,
-    pct_null_pace,
-    pct_null_pace_gap,
-    pct_null_positional_gap,
-    pace_data_status,
-    pct_null_hole,
-    pct_null_section,
-    pct_null_latitude,
-    pct_null_timestamp,
-    location_data_status,
-    pct_null_battery,
-    device_health_status,
-    pct_null_start_hole,
-    pct_null_goal_time,
-    round_config_status,
-    usability_score,
-    top_recommendation
-FROM iceberg.gold.critical_column_gaps
-ORDER BY usability_score ASC
-"""
-
-COLUMN_COMPLETENESS = """
--- Column completeness analysis for heatmap
-SELECT 
-    course_id,
-    COUNT(*) as total,
-    ROUND(100.0 * SUM(CASE WHEN pace IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as pace_pct,
-    ROUND(100.0 * SUM(CASE WHEN pace_gap IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as pace_gap_pct,
-    ROUND(100.0 * SUM(CASE WHEN hole_number IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as hole_pct,
-    ROUND(100.0 * SUM(CASE WHEN section_number IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as section_pct,
-    ROUND(100.0 * SUM(CASE WHEN latitude IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as gps_pct,
-    ROUND(100.0 * SUM(CASE WHEN battery_percentage IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as battery_pct,
-    ROUND(100.0 * SUM(CASE WHEN start_hole IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as start_hole_pct,
-    ROUND(100.0 * SUM(CASE WHEN goal_time IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as goal_time_pct,
-    ROUND(100.0 * SUM(CASE WHEN fix_timestamp IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as timestamp_pct,
-    ROUND(100.0 * SUM(CASE WHEN is_complete IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as is_complete_pct
+    COUNT(DISTINCT round_id) AS round_count,
+    COUNT(*) AS event_count,
+    SUM(CASE WHEN is_location_padding = FALSE THEN 1 ELSE 0 END) AS real_events,
+    MIN(event_date) AS first_date,
+    MAX(event_date) AS last_date,
+    date_diff('day', MIN(event_date), MAX(event_date)) + 1 AS total_days,
+    COUNT(DISTINCT CASE WHEN is_location_padding = FALSE THEN event_date END) AS playing_days,
+    MAX(section_number) AS max_section,
+    MAX(hole_number) AS max_hole,
+    CASE 
+        WHEN MAX(hole_number) >= 10 THEN '18-hole'
+        WHEN MAX(section_number) > 54 THEN '27-hole'
+        WHEN MAX(section_number) > 27 THEN '18-hole (loop)'
+        ELSE '9-hole'
+    END AS inferred_type
 FROM iceberg.silver.fact_telemetry_event
 GROUP BY course_id
 ORDER BY course_id
 """
 
 # =============================================================================
-# Column completeness (missing table) - generated directly by SQL for display
+# DATA QUALITY QUERIES
 # =============================================================================
 
-COLUMN_COMPLETENESS_MISSING_TABLE = """
--- Missing counts and missing % by course and column (for the dashboard table)
--- This is derived directly from silver, with all rounding done in SQL.
--- Excludes padding rows (real telemetry events only).
-WITH base AS (
-  SELECT
-    course_id,
-    COUNT(*) AS total_events,
-    SUM(CASE WHEN pace IS NULL THEN 1 ELSE 0 END) AS missing_pace,
-    SUM(CASE WHEN pace_gap IS NULL THEN 1 ELSE 0 END) AS missing_pace_gap,
-    SUM(CASE WHEN hole_number IS NULL THEN 1 ELSE 0 END) AS missing_hole,
-    SUM(CASE WHEN section_number IS NULL THEN 1 ELSE 0 END) AS missing_section,
-    SUM(CASE WHEN latitude IS NULL OR longitude IS NULL THEN 1 ELSE 0 END) AS missing_gps,
-    SUM(CASE WHEN battery_percentage IS NULL THEN 1 ELSE 0 END) AS missing_battery,
-    SUM(CASE WHEN start_hole IS NULL THEN 1 ELSE 0 END) AS missing_start_hole,
-    SUM(CASE WHEN goal_time IS NULL THEN 1 ELSE 0 END) AS missing_goal_time,
-    SUM(CASE WHEN fix_timestamp IS NULL THEN 1 ELSE 0 END) AS missing_timestamp,
-    SUM(CASE WHEN is_complete IS NULL THEN 1 ELSE 0 END) AS missing_is_complete
-  FROM iceberg.silver.fact_telemetry_event
-  WHERE is_location_padding = FALSE
-  GROUP BY course_id
+DATA_QUALITY_SCORE = """
+-- Data quality score per course (0-100 composite score)
+-- Weights: Core Telemetry (40%), Position Tracking (25%), Round Context (20%), Device Health (15%)
+-- Core Telemetry: pace, pace_gap, positional_gap, GPS (lat/long), fix_timestamp
+-- Position Tracking: hole_number, section_number, location_index, current_hole, current_hole_section
+-- Round Context: round_start_time, round_end_time, start_hole, start_section, is_complete
+-- Device Health: device, battery_percentage
+WITH quality_metrics AS (
+    SELECT
+        course_id,
+        COUNT(*) AS total_events,
+        -- Core Telemetry Metrics
+        ROUND(100.0 * SUM(CASE WHEN pace IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS pace_pct,
+        ROUND(100.0 * SUM(CASE WHEN pace_gap IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS pace_gap_pct,
+        ROUND(100.0 * SUM(CASE WHEN positional_gap IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS positional_gap_pct,
+        ROUND(100.0 * SUM(CASE WHEN latitude IS NOT NULL AND longitude IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS gps_complete_pct,
+        ROUND(100.0 * SUM(CASE WHEN fix_timestamp IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS fix_timestamp_pct,
+        -- Position Tracking Metrics
+        ROUND(100.0 * SUM(CASE WHEN hole_number IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS hole_pct,
+        ROUND(100.0 * SUM(CASE WHEN section_number IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS section_pct,
+        ROUND(100.0 * SUM(CASE WHEN location_index IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS location_index_pct,
+        ROUND(100.0 * SUM(CASE WHEN current_hole IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS current_hole_pct,
+        ROUND(100.0 * SUM(CASE WHEN current_hole_section IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS current_hole_section_pct,
+        -- Round Context Metrics
+        ROUND(100.0 * SUM(CASE WHEN round_start_time IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS round_start_time_pct,
+        ROUND(100.0 * SUM(CASE WHEN round_end_time IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS round_end_time_pct,
+        ROUND(100.0 * SUM(CASE WHEN start_hole IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS start_hole_pct,
+        ROUND(100.0 * SUM(CASE WHEN start_section IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS start_section_pct,
+        ROUND(100.0 * SUM(CASE WHEN is_complete IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS is_complete_pct,
+        ROUND(100.0 * SUM(CASE WHEN goal_name IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS goal_name_pct,
+        ROUND(100.0 * SUM(CASE WHEN is_projected IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS is_projected_pct,
+        ROUND(100.0 * SUM(CASE WHEN is_problem IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS is_problem_pct,
+        -- Device Health Metrics
+        ROUND(100.0 * SUM(CASE WHEN device IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS device_pct,
+        ROUND(100.0 * SUM(CASE WHEN battery_percentage IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS battery_pct,
+        -- Composite Quality Score
+        ROUND(
+            -- Core Telemetry (40%): pace metrics, GPS, timestamp
+            0.15 * (100.0 * SUM(CASE WHEN pace IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)) +
+            0.05 * (100.0 * SUM(CASE WHEN pace_gap IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)) +
+            0.05 * (100.0 * SUM(CASE WHEN positional_gap IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)) +
+            0.10 * (100.0 * SUM(CASE WHEN latitude IS NOT NULL AND longitude IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)) +
+            0.05 * (100.0 * SUM(CASE WHEN fix_timestamp IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)) +
+            -- Position Tracking (25%): hole, section, location tracking
+            0.08 * (100.0 * SUM(CASE WHEN hole_number IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)) +
+            0.08 * (100.0 * SUM(CASE WHEN section_number IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)) +
+            0.05 * (100.0 * SUM(CASE WHEN location_index IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)) +
+            0.02 * (100.0 * SUM(CASE WHEN current_hole IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)) +
+            0.02 * (100.0 * SUM(CASE WHEN current_hole_section IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)) +
+            -- Round Context (20%): round timing and metadata
+            0.05 * (100.0 * SUM(CASE WHEN round_start_time IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)) +
+            0.05 * (100.0 * SUM(CASE WHEN round_end_time IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)) +
+            0.04 * (100.0 * SUM(CASE WHEN start_hole IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)) +
+            0.03 * (100.0 * SUM(CASE WHEN start_section IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)) +
+            0.03 * (100.0 * SUM(CASE WHEN is_complete IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)) +
+            -- Device Health (15%): device identification and battery
+            0.10 * (100.0 * SUM(CASE WHEN device IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)) +
+            0.05 * (100.0 * SUM(CASE WHEN battery_percentage IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0))
+        , 1) AS quality_score
+    FROM iceberg.silver.fact_telemetry_event
+    WHERE is_location_padding = FALSE
+    GROUP BY course_id
 )
 SELECT
-  course_id AS "Course",
-  missing_pace AS "Pace (count)",
-  ROUND(100.0 * missing_pace / NULLIF(total_events, 0), 1) AS "Pace (%)",
-  missing_pace_gap AS "Pace Gap (count)",
-  ROUND(100.0 * missing_pace_gap / NULLIF(total_events, 0), 1) AS "Pace Gap (%)",
-  missing_hole AS "Hole (count)",
-  ROUND(100.0 * missing_hole / NULLIF(total_events, 0), 1) AS "Hole (%)",
-  missing_section AS "Section (count)",
-  ROUND(100.0 * missing_section / NULLIF(total_events, 0), 1) AS "Section (%)",
-  missing_gps AS "GPS (count)",
-  ROUND(100.0 * missing_gps / NULLIF(total_events, 0), 1) AS "GPS (%)",
-  missing_battery AS "Battery (count)",
-  ROUND(100.0 * missing_battery / NULLIF(total_events, 0), 1) AS "Battery (%)",
-  missing_start_hole AS "Start hole (count)",
-  ROUND(100.0 * missing_start_hole / NULLIF(total_events, 0), 1) AS "Start hole (%)",
-  missing_goal_time AS "Goal time (count)",
-  ROUND(100.0 * missing_goal_time / NULLIF(total_events, 0), 1) AS "Goal time (%)",
-  missing_timestamp AS "Start time (count)",
-  ROUND(100.0 * missing_timestamp / NULLIF(total_events, 0), 1) AS "Start time (%)",
-  missing_is_complete AS "Is complete (count)",
-  ROUND(100.0 * missing_is_complete / NULLIF(total_events, 0), 1) AS "Is complete (%)"
-FROM base
-ORDER BY "Course"
+    course_id,
+    total_events,
+    -- Core Telemetry Metrics
+    pace_pct,
+    pace_gap_pct,
+    positional_gap_pct,
+    gps_complete_pct,
+    fix_timestamp_pct,
+    -- Position Tracking Metrics
+    hole_pct,
+    section_pct,
+    location_index_pct,
+    current_hole_pct,
+    current_hole_section_pct,
+    -- Round Context Metrics
+    round_start_time_pct,
+    round_end_time_pct,
+    start_hole_pct,
+    start_section_pct,
+    is_complete_pct,
+    goal_name_pct,
+    is_projected_pct,
+    is_problem_pct,
+    -- Device Health Metrics
+    device_pct,
+    battery_pct,
+    -- Composite Quality Score
+    quality_score,
+    -- Quality Category
+    CASE
+        WHEN quality_score >= 90 THEN 'Excellent'
+        WHEN quality_score >= 75 THEN 'Good'
+        WHEN quality_score >= 60 THEN 'Fair'
+        WHEN quality_score >= 40 THEN 'Poor'
+        ELSE 'Critical'
+    END AS quality_category
+FROM quality_metrics
+ORDER BY quality_score DESC
 """
 
-COLUMN_COMPLETENESS_MISSING_TABLE_WITH_PADDING = """
--- Missing counts and missing % by course and column, broken down by padding vs non-padding
--- This shows how much of the missing data is from padding rows
-WITH base AS (
-  SELECT
-    course_id,
-    is_location_padding,
-    COUNT(*) AS total_events,
-    SUM(CASE WHEN pace IS NULL THEN 1 ELSE 0 END) AS missing_pace,
-    SUM(CASE WHEN pace_gap IS NULL THEN 1 ELSE 0 END) AS missing_pace_gap,
-    SUM(CASE WHEN hole_number IS NULL THEN 1 ELSE 0 END) AS missing_hole,
-    SUM(CASE WHEN section_number IS NULL THEN 1 ELSE 0 END) AS missing_section,
-    SUM(CASE WHEN latitude IS NULL OR longitude IS NULL THEN 1 ELSE 0 END) AS missing_gps,
-    SUM(CASE WHEN battery_percentage IS NULL THEN 1 ELSE 0 END) AS missing_battery,
-    SUM(CASE WHEN start_hole IS NULL THEN 1 ELSE 0 END) AS missing_start_hole,
-    SUM(CASE WHEN goal_time IS NULL THEN 1 ELSE 0 END) AS missing_goal_time,
-    SUM(CASE WHEN fix_timestamp IS NULL THEN 1 ELSE 0 END) AS missing_timestamp,
-    SUM(CASE WHEN is_complete IS NULL THEN 1 ELSE 0 END) AS missing_is_complete
-  FROM iceberg.silver.fact_telemetry_event
-  GROUP BY course_id, is_location_padding
-),
-aggregated AS (
-  SELECT
-    course_id,
-    SUM(CASE WHEN is_location_padding THEN total_events ELSE 0 END) AS padding_total,
-    SUM(CASE WHEN NOT is_location_padding THEN total_events ELSE 0 END) AS non_padding_total,
-    SUM(total_events) AS total_events,
-    -- Missing from padding rows
-    SUM(CASE WHEN is_location_padding THEN missing_pace ELSE 0 END) AS padding_missing_pace,
-    SUM(CASE WHEN is_location_padding THEN missing_pace_gap ELSE 0 END) AS padding_missing_pace_gap,
-    SUM(CASE WHEN is_location_padding THEN missing_hole ELSE 0 END) AS padding_missing_hole,
-    SUM(CASE WHEN is_location_padding THEN missing_section ELSE 0 END) AS padding_missing_section,
-    SUM(CASE WHEN is_location_padding THEN missing_gps ELSE 0 END) AS padding_missing_gps,
-    SUM(CASE WHEN is_location_padding THEN missing_battery ELSE 0 END) AS padding_missing_battery,
-    -- Missing from non-padding rows
-    SUM(CASE WHEN NOT is_location_padding THEN missing_pace ELSE 0 END) AS non_padding_missing_pace,
-    SUM(CASE WHEN NOT is_location_padding THEN missing_pace_gap ELSE 0 END) AS non_padding_missing_pace_gap,
-    SUM(CASE WHEN NOT is_location_padding THEN missing_hole ELSE 0 END) AS non_padding_missing_hole,
-    SUM(CASE WHEN NOT is_location_padding THEN missing_section ELSE 0 END) AS non_padding_missing_section,
-    SUM(CASE WHEN NOT is_location_padding THEN missing_gps ELSE 0 END) AS non_padding_missing_gps,
-    SUM(CASE WHEN NOT is_location_padding THEN missing_battery ELSE 0 END) AS non_padding_missing_battery,
-    -- Total missing (all rows)
-    SUM(missing_pace) AS total_missing_pace,
-    SUM(missing_pace_gap) AS total_missing_pace_gap,
-    SUM(missing_hole) AS total_missing_hole,
-    SUM(missing_section) AS total_missing_section,
-    SUM(missing_gps) AS total_missing_gps,
-    SUM(missing_battery) AS total_missing_battery
-  FROM base
-  GROUP BY course_id
-)
+# A compact version used in the dashboard table (stable shape = easier UI code).
+COLUMN_COMPLETENESS = """
+-- Column completeness by course (percentage of non-null values)
 SELECT
-  course_id AS "Course",
-  padding_total AS "Padding rows",
-  non_padding_total AS "Non-padding rows",
-  total_events AS "Total rows",
-  -- Show what % of missing data is from padding
-  ROUND(100.0 * padding_missing_pace / NULLIF(total_missing_pace, 0), 1) AS "Pace missing from padding (%)",
-  ROUND(100.0 * padding_missing_pace_gap / NULLIF(total_missing_pace_gap, 0), 1) AS "Pace Gap missing from padding (%)",
-  ROUND(100.0 * padding_missing_hole / NULLIF(total_missing_hole, 0), 1) AS "Hole missing from padding (%)",
-  ROUND(100.0 * padding_missing_section / NULLIF(total_missing_section, 0), 1) AS "Section missing from padding (%)",
-  ROUND(100.0 * padding_missing_gps / NULLIF(total_missing_gps, 0), 1) AS "GPS missing from padding (%)",
-  ROUND(100.0 * padding_missing_battery / NULLIF(total_missing_battery, 0), 1) AS "Battery missing from padding (%)",
-  -- Completeness excluding padding
-  ROUND(100.0 * (non_padding_total - non_padding_missing_pace) / NULLIF(non_padding_total, 0), 1) AS "Pace completeness (no padding)",
-  ROUND(100.0 * (non_padding_total - non_padding_missing_pace_gap) / NULLIF(non_padding_total, 0), 1) AS "Pace Gap completeness (no padding)",
-  ROUND(100.0 * (non_padding_total - non_padding_missing_hole) / NULLIF(non_padding_total, 0), 1) AS "Hole completeness (no padding)",
-  ROUND(100.0 * (non_padding_total - non_padding_missing_section) / NULLIF(non_padding_total, 0), 1) AS "Section completeness (no padding)",
-  ROUND(100.0 * (non_padding_total - non_padding_missing_gps) / NULLIF(non_padding_total, 0), 1) AS "GPS completeness (no padding)",
-  ROUND(100.0 * (non_padding_total - non_padding_missing_battery) / NULLIF(non_padding_total, 0), 1) AS "Battery completeness (no padding)",
-  -- Completeness including padding
-  ROUND(100.0 * (total_events - total_missing_pace) / NULLIF(total_events, 0), 1) AS "Pace completeness (with padding)",
-  ROUND(100.0 * (total_events - total_missing_pace_gap) / NULLIF(total_events, 0), 1) AS "Pace Gap completeness (with padding)",
-  ROUND(100.0 * (total_events - total_missing_hole) / NULLIF(total_events, 0), 1) AS "Hole completeness (with padding)",
-  ROUND(100.0 * (total_events - total_missing_section) / NULLIF(total_events, 0), 1) AS "Section completeness (with padding)",
-  ROUND(100.0 * (total_events - total_missing_gps) / NULLIF(total_events, 0), 1) AS "GPS completeness (with padding)",
-  ROUND(100.0 * (total_events - total_missing_battery) / NULLIF(total_events, 0), 1) AS "Battery completeness (with padding)"
-FROM aggregated
-ORDER BY "Course"
-"""
-
-COLUMN_COMPLETENESS_NON_PADDING = """
--- Column completeness analysis for heatmap (excluding padding rows)
-SELECT 
     course_id,
-    COUNT(*) as total,
-    ROUND(100.0 * SUM(CASE WHEN pace IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as pace_pct,
-    ROUND(100.0 * SUM(CASE WHEN pace_gap IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as pace_gap_pct,
-    ROUND(100.0 * SUM(CASE WHEN hole_number IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as hole_pct,
-    ROUND(100.0 * SUM(CASE WHEN section_number IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as section_pct,
-    ROUND(100.0 * SUM(CASE WHEN latitude IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as gps_pct,
-    ROUND(100.0 * SUM(CASE WHEN battery_percentage IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as battery_pct,
-    ROUND(100.0 * SUM(CASE WHEN start_hole IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as start_hole_pct,
-    ROUND(100.0 * SUM(CASE WHEN goal_time IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as goal_time_pct,
-    ROUND(100.0 * SUM(CASE WHEN fix_timestamp IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as timestamp_pct,
-    ROUND(100.0 * SUM(CASE WHEN is_complete IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) as is_complete_pct
+    COUNT(*) AS total_events,
+    ROUND(100.0 * SUM(CASE WHEN pace IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS pace_pct,
+    ROUND(100.0 * SUM(CASE WHEN pace_gap IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS pace_gap_pct,
+    ROUND(100.0 * SUM(CASE WHEN hole_number IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS hole_pct,
+    ROUND(100.0 * SUM(CASE WHEN section_number IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS section_pct,
+    ROUND(100.0 * SUM(CASE WHEN latitude IS NOT NULL AND longitude IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS gps_pct,
+    ROUND(100.0 * SUM(CASE WHEN fix_timestamp IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS fix_timestamp_pct,
+    ROUND(100.0 * SUM(CASE WHEN start_hole IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS start_hole_pct,
+    ROUND(100.0 * SUM(CASE WHEN start_section IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS start_section_pct,
+    ROUND(100.0 * SUM(CASE WHEN is_complete IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS is_complete_pct,
+    ROUND(100.0 * SUM(CASE WHEN battery_percentage IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS battery_pct,
+    ROUND(100.0 * SUM(CASE WHEN device IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS device_pct
 FROM iceberg.silver.fact_telemetry_event
 WHERE is_location_padding = FALSE
 GROUP BY course_id
 ORDER BY course_id
 """
 
-TELEMETRY_COMPLETENESS_SUMMARY = """
--- Get padding statistics from gold layer
-SELECT
+# A detailed version you can use later if you want deeper debugging in the UI.
+COLUMN_COMPLETENESS_EXTENDED = """
+-- Column completeness by course (percentage of non-null values)
+-- Ordered to match DATA_QUALITY_SCORE grouping: Core Telemetry, Position Tracking, Round Context, Device Health
+  SELECT
     course_id,
-    total_rows,
-    padding_rows,
-    non_padding_rows,
-    pct_padding_total,
-    ts_missing_rows,
-    ts_missing_non_padding_rows,
-    pct_ts_missing_total,
-    pct_ts_missing_non_padding
-FROM iceberg.gold.telemetry_completeness_summary
+    COUNT(*) AS total_events,
+    -- Core Telemetry Metrics
+    ROUND(100.0 * SUM(CASE WHEN pace IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS pace_pct,
+    ROUND(100.0 * SUM(CASE WHEN pace_gap IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS pace_gap_pct,
+    ROUND(100.0 * SUM(CASE WHEN positional_gap IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS positional_gap_pct,
+    ROUND(100.0 * SUM(CASE WHEN latitude IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS latitude_pct,
+    ROUND(100.0 * SUM(CASE WHEN longitude IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS longitude_pct,
+    ROUND(100.0 * SUM(CASE WHEN fix_timestamp IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS fix_timestamp_pct,
+    -- Position Tracking Metrics
+    ROUND(100.0 * SUM(CASE WHEN hole_number IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS hole_pct,
+    ROUND(100.0 * SUM(CASE WHEN section_number IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS section_pct,
+    ROUND(100.0 * SUM(CASE WHEN location_index IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS location_index_pct,
+    ROUND(100.0 * SUM(CASE WHEN current_hole IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS current_hole_pct,
+    ROUND(100.0 * SUM(CASE WHEN current_hole_section IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS current_hole_section_pct,
+    -- Round Context Metrics
+    ROUND(100.0 * SUM(CASE WHEN round_start_time IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS round_start_time_pct,
+    ROUND(100.0 * SUM(CASE WHEN round_end_time IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS round_end_time_pct,
+    ROUND(100.0 * SUM(CASE WHEN start_hole IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS start_hole_pct,
+    ROUND(100.0 * SUM(CASE WHEN start_section IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS start_section_pct,
+    ROUND(100.0 * SUM(CASE WHEN is_complete IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS is_complete_pct,
+    ROUND(100.0 * SUM(CASE WHEN goal_name IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS goal_name_pct,
+    ROUND(100.0 * SUM(CASE WHEN is_projected IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS is_projected_pct,
+    ROUND(100.0 * SUM(CASE WHEN is_problem IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS is_problem_pct,
+    ROUND(100.0 * SUM(CASE WHEN goal_time IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS goal_time_pct,
+    ROUND(100.0 * SUM(CASE WHEN end_section IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS end_section_pct,
+    -- Device Health Metrics
+    ROUND(100.0 * SUM(CASE WHEN device IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS device_pct,
+    ROUND(100.0 * SUM(CASE WHEN battery_percentage IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 1) AS battery_pct
+FROM iceberg.silver.fact_telemetry_event
+WHERE is_location_padding = FALSE
+GROUP BY course_id
 ORDER BY course_id
 """
 
-
-# =============================================================================
-# Course configuration page queries
-# =============================================================================
-
-COURSE_CONFIGURATION = """
--- Course configuration analysis
--- Shows course types, round completion, and complexity
+PADDING_ANALYSIS = """
+-- Padding data analysis by course
 SELECT
     course_id,
-    total_rounds,
-    likely_course_type,
-    max_section_seen,
-    max_holes_in_round,
-    pct_complete,
-    pct_incomplete,
-    pct_nine_hole,
-    pct_full_rounds,
-    unique_start_holes,
-    pct_shotgun_starts,
-    pct_single_nine,
-    pct_two_nines,
-    pct_all_three_nines,
-    avg_locations_per_round,
-    min_locations_per_round,
-    max_locations_per_round,
-    course_complexity_score
-FROM iceberg.gold.course_configuration_analysis
-ORDER BY course_complexity_score DESC
+    COUNT(*) AS total_events,
+    SUM(CASE WHEN is_location_padding = TRUE THEN 1 ELSE 0 END) AS padding_events,
+    SUM(CASE WHEN is_location_padding = FALSE THEN 1 ELSE 0 END) AS real_events,
+    ROUND(100.0 * SUM(CASE WHEN is_location_padding = TRUE THEN 1 ELSE 0 END) / COUNT(*), 1) AS padding_pct
+FROM iceberg.silver.fact_telemetry_event
+GROUP BY course_id
+ORDER BY padding_pct DESC
 """
 
 # =============================================================================
-# Course topology page queries
+# TOPOLOGY QUERIES
 # =============================================================================
 
-FACILITY_TOPOLOGY = """
--- Facility topology configuration
--- Maps course sections to physical units (nines)
+TOPOLOGY = """
+-- Course topology (nine boundaries)
 SELECT
-    facility_id,
-    unit_id,
+    facility_id AS course_id,
     unit_name,
     nine_number,
     section_start,
-    section_end
+    section_end,
+    section_end - section_start + 1 AS sections_in_nine
 FROM iceberg.silver.dim_facility_topology
 ORDER BY facility_id, nine_number
 """
 
-TOPOLOGY_VALIDATION_BRADSHAW = """
--- Bradshaw topology validation: events by unit
+# =============================================================================
+# COURSE PROFILE QUERIES
+# =============================================================================
+
+COURSE_PROFILE = """
+-- Course profile metadata (human-entered)
 SELECT
-    nine_number,
-    COUNT(DISTINCT round_id) AS rounds,
-    COUNT(*) AS fixes,
-    ROUND(AVG(pace), 1) AS avg_pace_sec,
-    ROUND(AVG(pace_gap), 1) AS avg_pace_gap_sec
-FROM iceberg.silver.fact_telemetry_event
-WHERE course_id = 'bradshawfarmgc'
-  AND is_location_padding = FALSE
-  AND nine_number IS NOT NULL
-GROUP BY nine_number
-ORDER BY nine_number
+    course_id,
+    course_type,
+    COALESCE(is_loop_course, FALSE) AS is_loop_course,
+    volume_profile,
+    peak_season_start_month,
+    peak_season_end_month,
+    notes
+FROM iceberg.silver.dim_course_profile
+ORDER BY course_id
 """
 
-LOOP_FATIGUE_AMERICAN_FALLS = """
--- American Falls loop fatigue analysis
--- Compares pace on same hole across loop 1 vs loop 2
-SELECT 
+LOOP_COURSES = """
+-- Get courses marked as loop courses (9-hole courses supporting 18-hole rounds)
+SELECT
+    course_id,
+    course_type,
+    notes
+FROM iceberg.silver.dim_course_profile
+WHERE is_loop_course = TRUE
+   OR course_type LIKE '%loop%'
+ORDER BY course_id
+"""
+
+COURSE_SUMMARY_WITH_PROFILE = """
+-- Course summary with profile metadata
+SELECT
+    cs.course_id,
+    cs.round_count,
+    cs.event_count,
+    cs.real_events,
+    cs.first_date,
+    cs.last_date,
+    cs.total_days,
+    cs.playing_days,
+    cs.inferred_type,
+    COALESCE(cp.course_type, cs.inferred_type) AS course_type,
+    COALESCE(cp.is_loop_course, FALSE) AS is_loop_course,
+    cp.volume_profile,
+    cp.notes
+FROM (
+    SELECT
+        course_id,
+        COUNT(DISTINCT round_id) AS round_count,
+        COUNT(*) AS event_count,
+        SUM(CASE WHEN is_location_padding = FALSE THEN 1 ELSE 0 END) AS real_events,
+        MIN(event_date) AS first_date,
+        MAX(event_date) AS last_date,
+        date_diff('day', MIN(event_date), MAX(event_date)) + 1 AS total_days,
+        COUNT(DISTINCT CASE WHEN is_location_padding = FALSE THEN event_date END) AS playing_days,
+        CASE 
+            WHEN MAX(hole_number) >= 10 THEN '18-hole'
+            WHEN MAX(section_number) > 54 THEN '27-hole'
+            WHEN MAX(section_number) > 27 THEN '18-hole (loop)'
+            ELSE '9-hole'
+        END AS inferred_type
+    FROM iceberg.silver.fact_telemetry_event
+    GROUP BY course_id
+) cs
+LEFT JOIN iceberg.silver.dim_course_profile cp ON cs.course_id = cp.course_id
+ORDER BY cs.course_id
+"""
+
+SECTIONS_PER_HOLE = """
+-- Sections per hole dimension table
+-- Computed from fact_telemetry_event if dim_sections_per_hole doesn't exist
+SELECT
+    course_id,
     hole_number,
-    nine_number,
-    ROUND(AVG(avg_pace_sec), 1) as avg_pace_seconds,
-    COUNT(*) as sample_size
-FROM iceberg.gold.fact_round_hole_performance
-WHERE course_id = 'americanfalls'
-GROUP BY hole_number, nine_number
-ORDER BY hole_number, nine_number
-"""
-
-SHOTGUN_START_DISTRIBUTION = """
--- Indian Creek shotgun start distribution
-SELECT
-    start_hole,
-    COUNT(DISTINCT round_id) AS rounds
-FROM iceberg.silver.fact_telemetry_event
-WHERE course_id = 'indiancreek'
-  AND is_location_padding = FALSE
-  AND start_hole IS NOT NULL
-GROUP BY start_hole
-ORDER BY rounds DESC, start_hole
-"""
-
-# =============================================================================
-# Seasonality page queries
-# =============================================================================
-
-ROUNDS_BY_MONTH = """
--- Rounds by month with percentage of total
-SELECT
-    course_id,
-    month_start,
-    month_number,
-    month_name,
-    rounds,
-    pct_total
-FROM iceberg.gold.course_rounds_by_month
-ORDER BY course_id, month_start
-"""
-
-ROUNDS_BY_WEEKDAY = """
--- Rounds by weekday
-SELECT
-    course_id,
-    weekday_number,
-    weekday_name,
-    rounds
-FROM iceberg.gold.course_rounds_by_weekday
-ORDER BY course_id, weekday_number
-"""
-
-# =============================================================================
-# Device health and pace analysis page queries
-# =============================================================================
-
-SIGNAL_QUALITY = """
--- Signal quality by round
-SELECT
-    course_id,
-    round_id,
-    fix_count,
-    projected_fix_count,
-    problem_fix_count,
-    projected_rate,
-    problem_rate
-FROM iceberg.gold.signal_quality_rounds
-"""
-
-SIGNAL_QUALITY_SUMMARY = """
--- Signal quality summary by course
-SELECT
-    course_id,
-    COUNT(*) as total_rounds,
-    SUM(fix_count) as total_fixes,
-    SUM(projected_fix_count) as total_projected,
-    SUM(problem_fix_count) as total_problems,
-    ROUND(100.0 * SUM(projected_fix_count) / NULLIF(SUM(fix_count), 0), 2) as pct_projected,
-    ROUND(100.0 * SUM(problem_fix_count) / NULLIF(SUM(fix_count), 0), 2) as pct_problems
-FROM iceberg.gold.signal_quality_rounds
-GROUP BY course_id
-ORDER BY pct_problems DESC
-"""
-
-BATTERY_HEALTH = """
--- Battery health analysis by course
--- Excludes padding rows (real telemetry events only)
-SELECT 
-    course_id,
-    COUNT(*) as total_events,
-    SUM(CASE WHEN battery_percentage < 20 THEN 1 ELSE 0 END) as low_battery_events,
-    SUM(CASE WHEN battery_percentage < 10 THEN 1 ELSE 0 END) as critical_battery_events,
-    ROUND(100.0 * SUM(CASE WHEN battery_percentage < 20 THEN 1 ELSE 0 END) / COUNT(*), 2) as pct_low_battery,
-    ROUND(100.0 * SUM(CASE WHEN battery_percentage < 10 THEN 1 ELSE 0 END) / COUNT(*), 2) as pct_critical_battery
+    MIN(section_number) AS section_start,
+    MAX(section_number) AS section_end,
+    COUNT(DISTINCT section_number) AS sections_count,
+    CASE 
+        WHEN MIN(section_number) IS NOT NULL AND MAX(section_number) IS NOT NULL 
+        THEN MAX(section_number) - MIN(section_number) + 1 
+        ELSE NULL 
+    END AS section_range
 FROM iceberg.silver.fact_telemetry_event
 WHERE is_location_padding = FALSE
-  AND battery_percentage IS NOT NULL
-GROUP BY course_id
-ORDER BY pct_low_battery DESC
-"""
-
-DEVICE_HEALTH_ERRORS = """
--- Device health error events
-SELECT
-    course_id,
-    round_id,
-    fix_timestamp,
-    battery_percentage,
-    health_flag
-FROM iceberg.gold.device_health_errors
-ORDER BY course_id, fix_timestamp
-"""
-
-
-def get_bottleneck_query(course_id: str) -> str:
-    """Generate bottleneck analysis query for a specific course.
-
-    Args:
-        course_id: Course identifier to analyse
-
-    Returns:
-        SQL query string
-    """
-    return f"""
--- Bottleneck analysis by section for {course_id}
--- Identifies where groups bunch up using pace_gap
-SELECT 
-    course_id,
-    hole_number,
-    section_number,
-    hole_section,
-    ROUND(AVG(latitude), 6) as lat,
-    ROUND(AVG(longitude), 6) as lon,
-    ROUND(AVG(pace_gap), 0) as avg_pace_gap_seconds,
-    ROUND(STDDEV(pace_gap), 0) as pace_gap_stddev,
-    ROUND(AVG(positional_gap), 0) as avg_positional_gap,
-    ROUND(AVG(pace), 0) as avg_pace_seconds,
-    COUNT(DISTINCT round_id) as rounds_measured,
-    COUNT(*) as total_fixes
-FROM iceberg.silver.fact_telemetry_event 
-WHERE course_id = '{course_id}'
-  AND is_location_padding = FALSE
-  AND latitude IS NOT NULL 
-  AND longitude IS NOT NULL 
-  AND pace_gap IS NOT NULL
   AND hole_number IS NOT NULL
-GROUP BY course_id, hole_number, section_number, hole_section
-HAVING COUNT(*) > 20
-ORDER BY section_number
+  AND section_number IS NOT NULL
+GROUP BY course_id, hole_number
+ORDER BY course_id, hole_number
 """
 
-
-PACE_SUMMARY = """
--- Pace summary by round
+# Prefer the precomputed dimension if it exists (created by `just generate-sections-per-hole`).
+SECTIONS_PER_HOLE_DIM = """
 SELECT
     course_id,
-    round_id,
-    round_start_ts,
-    round_end_ts,
-    fix_count,
-    avg_pace,
-    avg_pace_gap,
-    avg_positional_gap
-FROM iceberg.gold.pace_summary_by_round
-"""
-
-PACE_BY_HOLE = """
--- Pace by hole performance
-SELECT
-    course_id,
-    round_id,
     hole_number,
-    nine_number,
-    course_unit,
-    duration_sec,
-    avg_pace_sec,
-    max_pace_sec,
-    avg_pace_gap_sec
-FROM iceberg.gold.fact_round_hole_performance
-ORDER BY course_id, round_id, nine_number, hole_number
+    section_start,
+    section_end,
+    sections_count,
+    section_end - section_start + 1 AS section_range
+FROM iceberg.silver.dim_sections_per_hole
+ORDER BY course_id, hole_number
 """
 
 # =============================================================================
-# Course list query (for filters)
+# ROUND ANALYSIS QUERIES
 # =============================================================================
 
-COURSE_LIST = """
--- List of all courses (based on real telemetry only; excludes padding-only courses)
-SELECT DISTINCT course_id
+ROUND_TYPES = """
+-- Round type distribution by course
+SELECT
+    course_id,
+    COUNT(DISTINCT round_id) AS total_rounds,
+    SUM(CASE WHEN is_nine_hole = TRUE THEN 1 ELSE 0 END) AS nine_hole_rounds,
+    SUM(CASE WHEN is_nine_hole = FALSE THEN 1 ELSE 0 END) AS full_rounds,
+    SUM(CASE WHEN is_complete = TRUE THEN 1 ELSE 0 END) AS complete_rounds,
+    SUM(CASE WHEN start_hole != 1 THEN 1 ELSE 0 END) AS shotgun_starts
+FROM (
+SELECT
+    course_id,
+    round_id,
+        MAX(CAST(is_nine_hole AS INTEGER)) AS is_nine_hole,
+        MAX(CAST(is_complete AS INTEGER)) AS is_complete,
+        MIN(start_hole) AS start_hole
+    FROM iceberg.silver.fact_telemetry_event
+    GROUP BY course_id, round_id
+)
+GROUP BY course_id
+ORDER BY course_id
+"""
+
+ROUND_DURATION = """
+-- Round duration statistics by course
+SELECT 
+    course_id,
+    COUNT(DISTINCT round_id) AS rounds_with_duration,
+    ROUND(AVG(round_duration_minutes), 0) AS avg_duration_min,
+    ROUND(MIN(round_duration_minutes), 0) AS min_duration_min,
+    ROUND(MAX(round_duration_minutes), 0) AS max_duration_min
 FROM iceberg.silver.fact_telemetry_event
-WHERE is_location_padding = FALSE
+WHERE round_duration_minutes IS NOT NULL
+  AND round_duration_minutes > 0
+  AND round_duration_minutes < 600  -- Filter unrealistic durations
+GROUP BY course_id
 ORDER BY course_id
 """
 
 # =============================================================================
-# DBT Provenance SQL (silver → gold transformations)
-# These show how gold tables are built from silver, for educational/demo purposes
+# SAMPLE DATA QUERIES
 # =============================================================================
 
-DBT_DATA_QUALITY_OVERVIEW = """
--- dbt model: pipeline/gold/models/gold/data_quality_overview.sql
--- This is the transformation from silver -> gold
-WITH base AS (
-    SELECT
-        course_id,
+
+def get_round_sample(course_id: str, round_id: str = None) -> str:
+    """Get a sample of telemetry data for a round, ordered logically."""
+    if round_id:
+        where = f"WHERE course_id = '{course_id}' AND round_id = '{round_id}'"
+    else:
+        where = f"WHERE course_id = '{course_id}'"
+
+    return f"""
+SELECT 
         round_id,
-        pace,
-        pace_gap,
-        positional_gap,
-        goal_time,
-        latitude,
-        longitude,
-        fix_timestamp,
-        hole_number,
-        section_number,
-        hole_section,
+        location_index,
+    hole_number,
+    section_number,
         nine_number,
-        current_nine,
-        battery_percentage,
-        is_cache,
-        is_projected,
-        is_problem,
-        is_timestamp_missing,
-        start_hole,
-        start_section,
-        end_section,
-        is_nine_hole,
-        is_complete
-    FROM iceberg.silver.fact_telemetry_event
-    WHERE is_location_padding = FALSE
-),
-course_stats AS (
-    SELECT
-        course_id,
-        COUNT(*) AS total_events,
-        COUNT(DISTINCT round_id) AS total_rounds,
-        SUM(CASE WHEN pace IS NULL THEN 1 ELSE 0 END) AS null_pace,
-        SUM(CASE WHEN pace_gap IS NULL THEN 1 ELSE 0 END) AS null_pace_gap,
-        SUM(CASE WHEN positional_gap IS NULL THEN 1 ELSE 0 END) AS null_positional_gap,
-        SUM(CASE WHEN goal_time IS NULL THEN 1 ELSE 0 END) AS null_goal_time,
-        SUM(CASE WHEN latitude IS NULL OR longitude IS NULL THEN 1 ELSE 0 END) AS null_coordinates,
-        SUM(CASE WHEN fix_timestamp IS NULL THEN 1 ELSE 0 END) AS null_fix_timestamp,
-        SUM(CASE WHEN hole_number IS NULL THEN 1 ELSE 0 END) AS null_hole_number,
-        SUM(CASE WHEN section_number IS NULL THEN 1 ELSE 0 END) AS null_section_number,
-        SUM(CASE WHEN battery_percentage IS NULL THEN 1 ELSE 0 END) AS null_battery,
-        SUM(CASE WHEN is_cache IS NULL THEN 1 ELSE 0 END) AS null_is_cache,
-        SUM(CASE WHEN is_timestamp_missing = TRUE THEN 1 ELSE 0 END) AS timestamp_missing_flag,
-        SUM(CASE WHEN start_hole IS NULL THEN 1 ELSE 0 END) AS null_start_hole,
-        SUM(CASE WHEN is_nine_hole IS NULL THEN 1 ELSE 0 END) AS null_is_nine_hole,
-        SUM(CASE WHEN is_complete IS NULL THEN 1 ELSE 0 END) AS null_is_complete
-    FROM base
-    GROUP BY course_id
-)
-SELECT
+        pace,
+        fix_timestamp,
+        is_location_padding
+FROM iceberg.silver.fact_telemetry_event 
+    {where}
+    ORDER BY round_id, hole_number NULLS LAST, section_number NULLS LAST, location_index
+    LIMIT 100
+    """
+
+
+ROUND_LIST = """
+-- List of rounds for exploration
+SELECT DISTINCT
     course_id,
-    total_events,
-    total_rounds,
-    ROUND(100.0 * null_pace / NULLIF(total_events, 0), 2) AS pct_missing_pace,
-    ROUND(100.0 * null_pace_gap / NULLIF(total_events, 0), 2) AS pct_missing_pace_gap,
-    ROUND(100.0 * null_hole_number / NULLIF(total_events, 0), 2) AS pct_missing_hole,
-    ROUND(100.0 * null_section_number / NULLIF(total_events, 0), 2) AS pct_missing_section,
-    ROUND(100.0 * null_coordinates / NULLIF(total_events, 0), 2) AS pct_missing_coords,
-    ROUND(100.0 * null_fix_timestamp / NULLIF(total_events, 0), 2) AS pct_missing_timestamp,
-    ROUND(100.0 * null_battery / NULLIF(total_events, 0), 2) AS pct_missing_battery,
-    ROUND(100.0 * null_is_cache / NULLIF(total_events, 0), 2) AS pct_missing_cache_flag,
-    ROUND(100.0 * null_start_hole / NULLIF(total_events, 0), 2) AS pct_missing_start_hole,
-    ROUND(100.0 * null_is_nine_hole / NULLIF(total_events, 0), 2) AS pct_missing_nine_hole_flag,
-    ROUND(100.0 * null_is_complete / NULLIF(total_events, 0), 2) AS pct_missing_complete_flag,
-    ROUND(100.0 * timestamp_missing_flag / NULLIF(total_events, 0), 2) AS pct_problem_events,
-    ROUND(100 - (
-        (COALESCE(100.0 * null_pace / NULLIF(total_events, 0), 0) +
-         COALESCE(100.0 * null_pace_gap / NULLIF(total_events, 0), 0) +
-         COALESCE(100.0 * null_positional_gap / NULLIF(total_events, 0), 0) +
-         COALESCE(100.0 * null_goal_time / NULLIF(total_events, 0), 0)) / 4
-    ), 1) AS data_quality_score
-FROM course_stats
-ORDER BY data_quality_score ASC
+    round_id,
+    MIN(event_date) AS round_date,
+    COUNT(*) AS event_count
+FROM iceberg.silver.fact_telemetry_event
+WHERE is_location_padding = FALSE
+GROUP BY course_id, round_id
+ORDER BY course_id, MIN(event_date) DESC
+LIMIT 100
 """
 
-DBT_CRITICAL_COLUMN_GAPS = """
--- dbt model: pipeline/gold/models/gold/critical_column_gaps.sql
--- This is the transformation from silver -> gold
-WITH column_analysis AS (
-    SELECT
-        course_id,
-        COUNT(*) AS total_events,
-        COUNT(DISTINCT round_id) AS total_rounds,
-        SUM(CASE WHEN pace IS NULL THEN 1 ELSE 0 END) AS t1_null_pace,
-        SUM(CASE WHEN pace_gap IS NULL THEN 1 ELSE 0 END) AS t1_null_pace_gap,
-        SUM(CASE WHEN positional_gap IS NULL THEN 1 ELSE 0 END) AS t1_null_positional_gap,
-        SUM(CASE WHEN hole_number IS NULL THEN 1 ELSE 0 END) AS t2_null_hole,
-        SUM(CASE WHEN section_number IS NULL THEN 1 ELSE 0 END) AS t2_null_section,
-        SUM(CASE WHEN latitude IS NULL THEN 1 ELSE 0 END) AS t2_null_lat,
-        SUM(CASE WHEN fix_timestamp IS NULL THEN 1 ELSE 0 END) AS t2_null_timestamp,
-        SUM(CASE WHEN battery_percentage IS NULL THEN 1 ELSE 0 END) AS t3_null_battery,
-        SUM(CASE WHEN is_cache IS NULL THEN 1 ELSE 0 END) AS t3_null_cache,
-        SUM(CASE WHEN start_hole IS NULL THEN 1 ELSE 0 END) AS t4_null_start_hole,
-        SUM(CASE WHEN is_nine_hole IS NULL THEN 1 ELSE 0 END) AS t4_null_is_nine_hole,
-        SUM(CASE WHEN is_complete IS NULL THEN 1 ELSE 0 END) AS t4_null_is_complete,
-        SUM(CASE WHEN goal_time IS NULL THEN 1 ELSE 0 END) AS t4_null_goal_time
-    FROM iceberg.silver.fact_telemetry_event
-    WHERE is_location_padding = FALSE
-    GROUP BY course_id
-)
-SELECT
+# =============================================================================
+# DEVICE HEALTH QUERIES
+# =============================================================================
+
+DEVICE_STATS = """
+-- Device statistics by course
+SELECT 
     course_id,
-    total_events,
-    total_rounds,
-    ROUND(100.0 * t1_null_pace / total_events, 2) AS pct_null_pace,
-    ROUND(100.0 * t1_null_pace_gap / total_events, 2) AS pct_null_pace_gap,
-    ROUND(100.0 * t1_null_positional_gap / total_events, 2) AS pct_null_positional_gap,
-    CASE 
-        WHEN 100.0 * GREATEST(t1_null_pace, t1_null_pace_gap) / total_events > 50 THEN '🔴 CRITICAL: Pace analysis NOT possible'
-        WHEN 100.0 * GREATEST(t1_null_pace, t1_null_pace_gap) / total_events > 20 THEN '🟠 WARNING: Pace analysis degraded'
-        WHEN 100.0 * GREATEST(t1_null_pace, t1_null_pace_gap) / total_events > 5 THEN '🟡 MINOR: Some pace gaps'
-        ELSE '🟢 GOOD: Pace data complete'
-    END AS pace_data_status,
-    ROUND(100.0 * t2_null_hole / total_events, 2) AS pct_null_hole,
-    ROUND(100.0 * t2_null_section / total_events, 2) AS pct_null_section,
-    ROUND(100.0 * t2_null_lat / total_events, 2) AS pct_null_latitude,
-    ROUND(100.0 * t2_null_timestamp / total_events, 2) AS pct_null_timestamp,
-    CASE 
-        WHEN 100.0 * t2_null_hole / total_events > 30 THEN '🔴 CRITICAL: Hole tracking broken'
-        WHEN 100.0 * t2_null_hole / total_events > 10 THEN '🟠 WARNING: Location gaps detected'
-        ELSE '🟢 GOOD: Location data complete'
-    END AS location_data_status,
-    ROUND(100.0 * t3_null_battery / total_events, 2) AS pct_null_battery,
-    ROUND(100.0 * t3_null_cache / total_events, 2) AS pct_null_cache_flag,
-    CASE 
-        WHEN 100.0 * t3_null_battery / total_events > 50 THEN '🟠 WARNING: Cannot monitor device health'
-        WHEN 100.0 * t3_null_battery / total_events > 20 THEN '🟡 MINOR: Some battery data missing'
-        ELSE '🟢 GOOD: Device health trackable'
-    END AS device_health_status,
-    ROUND(100.0 * t4_null_start_hole / total_events, 2) AS pct_null_start_hole,
-    ROUND(100.0 * t4_null_is_nine_hole / total_events, 2) AS pct_null_nine_hole_flag,
-    ROUND(100.0 * t4_null_goal_time / total_events, 2) AS pct_null_goal_time,
-    CASE 
-        WHEN 100.0 * (t4_null_goal_time + t4_null_start_hole) / (2 * total_events) > 80 THEN '🟠 WARNING: Goal times not set'
-        WHEN 100.0 * (t4_null_goal_time + t4_null_start_hole) / (2 * total_events) > 50 THEN '🟡 MINOR: Start hole unknown'
-        ELSE '🟢 GOOD: Round config available'
-    END AS round_config_status,
-    ROUND(100 - (
-        0.40 * (100.0 * CASE 
-            WHEN (t1_null_pace + t1_null_pace_gap) > 0 THEN GREATEST(t1_null_pace, t1_null_pace_gap) 
-            ELSE 0 
-        END / total_events) +
-        0.30 * (100.0 * (t2_null_hole + t2_null_timestamp) / (2 * total_events)) +
-        0.20 * (100.0 * t3_null_battery / total_events) +
-        0.10 * (100.0 * (t4_null_goal_time + t4_null_start_hole) / (2 * total_events))
-    ), 1) AS usability_score,
-    CASE 
-        WHEN 100.0 * GREATEST(t1_null_pace, t1_null_pace_gap) / total_events > 20 
-        THEN 'Check pace calculation algorithm - many events missing pace values'
-        WHEN 100.0 * t2_null_hole / total_events > 20 
-        THEN 'Review location assignment logic - many events without hole numbers'
-        WHEN 100.0 * t3_null_battery / total_events > 50 
-        THEN 'Enable battery reporting on devices'
-        WHEN 100.0 * (t4_null_goal_time + t4_null_start_hole) / (2 * total_events) > 80 
-        THEN 'Configure goal times for this course in the system'
-        ELSE 'Data quality acceptable - monitor for changes'
-    END AS top_recommendation
-FROM column_analysis
-ORDER BY usability_score ASC
+    COUNT(DISTINCT device) AS unique_devices,
+    ROUND(AVG(battery_percentage), 1) AS avg_battery,
+    ROUND(MIN(battery_percentage), 1) AS min_battery,
+    COUNT(*) AS total_events,
+    SUM(CASE WHEN battery_percentage < 20 THEN 1 ELSE 0 END) AS low_battery_events,
+    ROUND(100.0 * SUM(CASE WHEN battery_percentage < 20 THEN 1 ELSE 0 END) / COUNT(*), 1) AS low_battery_pct,
+    SUM(CASE WHEN is_cache = TRUE THEN 1 ELSE 0 END) AS cached_events,
+    ROUND(100.0 * SUM(CASE WHEN is_cache = TRUE THEN 1 ELSE 0 END) / COUNT(*), 1) AS cached_pct,
+    SUM(CASE WHEN is_problem = TRUE THEN 1 ELSE 0 END) AS problem_events,
+    ROUND(100.0 * SUM(CASE WHEN is_problem = TRUE THEN 1 ELSE 0 END) / COUNT(*), 1) AS problem_pct,
+    SUM(CASE WHEN is_projected = TRUE THEN 1 ELSE 0 END) AS projected_events,
+    ROUND(100.0 * SUM(CASE WHEN is_projected = TRUE THEN 1 ELSE 0 END) / COUNT(*), 1) AS projected_pct
+FROM iceberg.silver.fact_telemetry_event
+WHERE is_location_padding = FALSE
+GROUP BY course_id
+ORDER BY course_id
 """
 
-DBT_COURSE_CONFIGURATION = """
--- dbt model: pipeline/gold/models/gold/course_configuration_analysis.sql
--- This is the transformation from silver -> gold
-WITH round_configs AS (
+# =============================================================================
+# TOPOLOGY MAP QUERIES (GPS)
+# =============================================================================
+
+COURSE_CENTROIDS = """
+-- One point per course for map overview
+SELECT
+    course_id,
+    ROUND(AVG(latitude), 6) AS latitude,
+    ROUND(AVG(longitude), 6) AS longitude,
+    COUNT(*) AS event_count,
+    SUM(CASE WHEN is_projected = TRUE THEN 1 ELSE 0 END) AS projected_events
+FROM iceberg.silver.fact_telemetry_event
+WHERE is_location_padding = FALSE
+  AND latitude IS NOT NULL
+  AND longitude IS NOT NULL
+GROUP BY course_id
+ORDER BY course_id
+"""
+
+
+def get_course_topology_map_points(course_id: str) -> str:
+    """Return a small set of representative points to visualise a single course map.
+
+    We aggregate telemetry to (nine, hole, section) centroids so the map stays fast and
+    communicates topology (course structure) rather than raw point density.
+    """
+    safe_course_id = course_id.replace("'", "''")
+    return f"""
+SELECT
+    course_id,
+    nine_number,
+    hole_number,
+    section_number,
+    ROUND(AVG(latitude), 6) AS latitude,
+    ROUND(AVG(longitude), 6) AS longitude,
+    COUNT(*) AS event_count,
+    SUM(CASE WHEN is_projected = TRUE THEN 1 ELSE 0 END) AS projected_events,
+    ROUND(100.0 * SUM(CASE WHEN is_projected = TRUE THEN 1 ELSE 0 END) / COUNT(*), 1) AS projected_pct
+FROM iceberg.silver.fact_telemetry_event
+WHERE is_location_padding = FALSE
+  AND course_id = '{safe_course_id}'
+  AND latitude IS NOT NULL
+  AND longitude IS NOT NULL
+  AND nine_number IS NOT NULL
+  AND hole_number IS NOT NULL
+  AND section_number IS NOT NULL
+GROUP BY course_id, nine_number, hole_number, section_number
+ORDER BY nine_number, hole_number, section_number
+"""
+
+
+# =============================================================================
+# TIME PATTERN QUERIES
+# =============================================================================
+
+ROUNDS_BY_MONTH = """
+-- Round distribution by month
+SELECT
+    course_id,
+    event_year,
+    event_month,
+    COUNT(DISTINCT round_id) AS round_count
+    FROM iceberg.silver.fact_telemetry_event
+WHERE event_year IS NOT NULL
+GROUP BY course_id, event_year, event_month
+ORDER BY course_id, event_year, event_month
+"""
+
+ROUNDS_BY_WEEKDAY = """
+-- Round distribution by day of week
+SELECT
+    course_id,
+    event_weekday,
+    COUNT(DISTINCT round_id) AS round_count
+    FROM iceberg.silver.fact_telemetry_event
+WHERE event_weekday IS NOT NULL
+GROUP BY course_id, event_weekday
+ORDER BY course_id, event_weekday
+"""
+
+# =============================================================================
+# ROUND LENGTH / HOLES VISITED
+# =============================================================================
+
+ROUND_LENGTH_DISTRIBUTION = """
+-- Count rounds by holes visited (non-padding events)
+WITH round_holes AS (
     SELECT
         course_id,
         round_id,
-        start_hole,
-        is_nine_hole,
-        is_complete,
-        MIN(section_number) AS min_section,
-        MAX(section_number) AS max_section,
-        MIN(nine_number) AS min_nine,
-        MAX(nine_number) AS max_nine,
-        COUNT(DISTINCT hole_number) AS unique_holes_played,
-        COUNT(DISTINCT nine_number) AS nines_played,
-        COUNT(*) AS location_count
+        COUNT(DISTINCT hole_number) AS holes_visited
     FROM iceberg.silver.fact_telemetry_event
     WHERE is_location_padding = FALSE
       AND hole_number IS NOT NULL
-    GROUP BY course_id, round_id, start_hole, is_nine_hole, is_complete
-),
-course_summary AS (
+    GROUP BY course_id, round_id
+)
+SELECT
+    course_id,
+    CASE
+        WHEN holes_visited < 9 THEN '<9'
+        WHEN holes_visited = 9 THEN '9'
+        WHEN holes_visited = 18 THEN '18'
+        WHEN holes_visited = 27 THEN '27'
+        WHEN holes_visited > 27 THEN '>27'
+        ELSE 'other (10–26)'
+    END AS round_length_bucket,
+    COUNT(*) AS round_count
+FROM round_holes
+GROUP BY course_id, 2
+ORDER BY course_id,
+    CASE
+        WHEN round_length_bucket = '<9' THEN 1
+        WHEN round_length_bucket = '9' THEN 2
+        WHEN round_length_bucket = '18' THEN 3
+        WHEN round_length_bucket = '27' THEN 4
+        WHEN round_length_bucket = '>27' THEN 5
+        ELSE 6
+    END
+"""
+
+# =============================================================================
+# NINES PLAYED (KEY FOR 27-HOLE COURSES)
+# =============================================================================
+
+ROUND_NINE_COMBINATIONS = """
+-- Which nines were played per round? Essential for 27-hole courses.
+-- Groups rounds by the set of nine_number values observed (e.g. "1", "1+2", "1+2+3").
+WITH round_nines AS (
     SELECT
         course_id,
-        COUNT(DISTINCT round_id) AS total_rounds,
-        MAX(max_section) AS max_section_seen,
-        MAX(unique_holes_played) AS max_holes_in_round,
-        MAX(nines_played) AS max_nines_in_round,
-        CASE 
-            WHEN MAX(max_section) > 54 THEN '27-hole'
-            WHEN MAX(max_section) > 27 THEN '18-hole'
-            ELSE '9-hole'
-        END AS likely_course_type,
-        SUM(CASE WHEN is_nine_hole = TRUE THEN 1 ELSE 0 END) AS nine_hole_rounds,
-        SUM(CASE WHEN is_nine_hole = FALSE OR is_nine_hole IS NULL THEN 1 ELSE 0 END) AS full_rounds,
-        SUM(CASE WHEN is_complete = TRUE THEN 1 ELSE 0 END) AS complete_rounds,
-        SUM(CASE WHEN is_complete = FALSE THEN 1 ELSE 0 END) AS incomplete_rounds,
-        COUNT(DISTINCT start_hole) AS unique_start_holes,
-        SUM(CASE WHEN start_hole = 1 THEN 1 ELSE 0 END) AS rounds_starting_hole_1,
-        SUM(CASE WHEN start_hole != 1 AND start_hole IS NOT NULL THEN 1 ELSE 0 END) AS shotgun_start_rounds,
-        SUM(CASE WHEN nines_played = 1 THEN 1 ELSE 0 END) AS single_nine_rounds,
-        SUM(CASE WHEN nines_played = 2 THEN 1 ELSE 0 END) AS two_nine_rounds,
-        SUM(CASE WHEN nines_played >= 3 THEN 1 ELSE 0 END) AS three_nine_rounds,
-        ROUND(AVG(location_count), 0) AS avg_locations_per_round,
-        MIN(location_count) AS min_locations_per_round,
-        MAX(location_count) AS max_locations_per_round
-    FROM round_configs
+        round_id,
+        ARRAY_AGG(DISTINCT nine_number ORDER BY nine_number) AS nines_array,
+        COUNT(DISTINCT nine_number) AS nines_count,
+        COUNT(DISTINCT hole_number) AS holes_played
+    FROM iceberg.silver.fact_telemetry_event
+    WHERE is_location_padding = FALSE
+      AND nine_number IS NOT NULL
+    GROUP BY course_id, round_id
+)
+SELECT
+    course_id,
+    -- Create a readable string like "1", "1+2", "1+2+3"
+    ARRAY_JOIN(nines_array, '+') AS nines_played,
+    nines_count,
+    CASE
+        WHEN holes_played < 9 THEN '<9'
+        WHEN holes_played = 9 THEN '9'
+        WHEN holes_played = 18 THEN '18'
+        WHEN holes_played = 27 THEN '27'
+        WHEN holes_played > 27 THEN '>27'
+        ELSE 'other (10–26)'
+    END AS holes_played_bucket,
+    COUNT(*) AS round_count
+FROM round_nines
+GROUP BY course_id, nines_array, nines_count, 4
+ORDER BY course_id, nines_count, nines_played
+"""
+
+
+def get_round_nine_combinations_for_course(course_id: str) -> str:
+    """Return ROUND_NINE_COMBINATIONS filtered to a single course."""
+    safe_course_id = course_id.replace("'", "''")
+    return f"""
+WITH round_nines AS (
+    SELECT
+        course_id,
+        round_id,
+        ARRAY_AGG(DISTINCT nine_number ORDER BY nine_number) AS nines_array,
+        COUNT(DISTINCT nine_number) AS nines_count,
+        COUNT(DISTINCT hole_number) AS holes_played
+    FROM iceberg.silver.fact_telemetry_event
+    WHERE is_location_padding = FALSE
+      AND nine_number IS NOT NULL
+      AND course_id = '{safe_course_id}'
+    GROUP BY course_id, round_id
+)
+SELECT
+    course_id,
+    ARRAY_JOIN(nines_array, '+') AS nines_played,
+    nines_count,
+    CASE
+        WHEN holes_played < 9 THEN '<9'
+        WHEN holes_played = 9 THEN '9'
+        WHEN holes_played = 18 THEN '18'
+        WHEN holes_played = 27 THEN '27'
+        WHEN holes_played > 27 THEN '>27'
+        ELSE 'other (10–26)'
+    END AS holes_played_bucket,
+    COUNT(*) AS round_count
+FROM round_nines
+GROUP BY course_id, nines_array, nines_count, 4
+ORDER BY nines_count, nines_played
+"""
+
+
+# =============================================================================
+# ROUND VALIDATION QUERIES
+# =============================================================================
+
+ROUND_VALIDATION = """
+-- Round validation: check if rounds make logical sense
+-- Validates: duration, sequence, completeness
+WITH round_stats AS (
+    SELECT
+        course_id,
+        round_id,
+        MIN(fix_timestamp) AS first_fix,
+        MAX(fix_timestamp) AS last_fix,
+        MIN(round_start_time) AS round_start,
+        MAX(round_end_time) AS round_end,
+        MAX(round_duration_minutes) AS duration_minutes,
+        MIN(start_hole) AS start_hole,
+        MIN(hole_number) AS min_hole,
+        MAX(hole_number) AS max_hole,
+        MIN(section_number) AS min_section,
+        MAX(section_number) AS max_section,
+        COUNT(DISTINCT hole_number) AS holes_visited,
+        COUNT(DISTINCT section_number) AS sections_visited,
+        MAX(CAST(is_complete AS INTEGER)) AS is_complete,
+        MAX(CAST(is_nine_hole AS INTEGER)) AS is_nine_hole,
+        COUNT(*) AS event_count,
+        SUM(CASE WHEN is_location_padding = FALSE THEN 1 ELSE 0 END) AS real_events,
+        SUM(CASE WHEN pace IS NOT NULL THEN 1 ELSE 0 END) AS events_with_pace
+    FROM iceberg.silver.fact_telemetry_event
+    GROUP BY course_id, round_id
+)
+SELECT
+    course_id,
+    round_id,
+    duration_minutes,
+    start_hole,
+    min_hole,
+    max_hole,
+    holes_visited,
+    sections_visited,
+    event_count,
+    real_events,
+    is_complete,
+    is_nine_hole,
+    
+    -- Duration validation (9-hole: 60-180 min, 18-hole: 120-360 min)
+    CASE
+        WHEN duration_minutes IS NULL THEN FALSE
+        WHEN is_nine_hole = 1 AND duration_minutes BETWEEN 45 AND 200 THEN TRUE
+        WHEN is_nine_hole = 0 AND duration_minutes BETWEEN 90 AND 400 THEN TRUE
+        ELSE FALSE
+    END AS duration_valid,
+    
+    -- Sequence validation: holes should be sequential from start
+    CASE
+        WHEN start_hole IS NULL THEN FALSE
+        WHEN min_hole IS NULL THEN FALSE
+        -- For shotgun starts, min_hole should match start_hole
+        WHEN start_hole > 1 AND min_hole = start_hole THEN TRUE
+        -- For normal starts, should start at hole 1
+        WHEN start_hole = 1 AND min_hole = 1 THEN TRUE
+        ELSE FALSE
+    END AS sequence_valid,
+    
+    -- Completeness validation: should have reasonable event count
+    CASE
+        WHEN real_events < 10 THEN FALSE
+        WHEN is_nine_hole = 1 AND real_events >= 9 THEN TRUE
+        WHEN is_nine_hole = 0 AND real_events >= 18 THEN TRUE
+        ELSE FALSE
+    END AS events_valid,
+    
+    -- Pace data validation: should have some pace data
+    CASE
+        WHEN events_with_pace = 0 THEN FALSE
+        WHEN CAST(events_with_pace AS DOUBLE) / NULLIF(real_events, 0) >= 0.5 THEN TRUE
+        ELSE FALSE
+    END AS pace_valid
+    
+FROM round_stats
+ORDER BY course_id, round_id
+"""
+
+
+def get_round_validation_for_course(course_id: str) -> str:
+    """Return the ROUND_VALIDATION query filtered to a single course.
+
+    Why: The unfiltered ROUND_VALIDATION can be large. Filtering server-side keeps
+    the dashboard responsive as data scales beyond the pilot.
+    """
+    # Basic single-quote escaping for safety in this demo dashboard.
+    safe_course_id = course_id.replace("'", "''")
+    return f"""
+WITH round_stats AS (
+    SELECT
+        course_id,
+        round_id,
+        MIN(fix_timestamp) AS first_fix,
+        MAX(fix_timestamp) AS last_fix,
+        MIN(round_start_time) AS round_start,
+        MAX(round_end_time) AS round_end,
+        MAX(round_duration_minutes) AS duration_minutes,
+        MIN(start_hole) AS start_hole,
+        MIN(hole_number) AS min_hole,
+        MAX(hole_number) AS max_hole,
+        MIN(section_number) AS min_section,
+        MAX(section_number) AS max_section,
+        COUNT(DISTINCT hole_number) AS holes_visited,
+        COUNT(DISTINCT section_number) AS sections_visited,
+        MAX(CAST(is_complete AS INTEGER)) AS is_complete,
+        MAX(CAST(is_nine_hole AS INTEGER)) AS is_nine_hole,
+        COUNT(*) AS event_count,
+        SUM(CASE WHEN is_location_padding = FALSE THEN 1 ELSE 0 END) AS real_events,
+        SUM(CASE WHEN pace IS NOT NULL THEN 1 ELSE 0 END) AS events_with_pace
+    FROM iceberg.silver.fact_telemetry_event
+    WHERE course_id = '{safe_course_id}'
+    GROUP BY course_id, round_id
+)
+SELECT
+    course_id,
+    round_id,
+    duration_minutes,
+    start_hole,
+    min_hole,
+    max_hole,
+    holes_visited,
+    sections_visited,
+    event_count,
+    real_events,
+    is_complete,
+    is_nine_hole,
+    CASE
+        WHEN duration_minutes IS NULL THEN FALSE
+        WHEN is_nine_hole = 1 AND duration_minutes BETWEEN 45 AND 200 THEN TRUE
+        WHEN is_nine_hole = 0 AND duration_minutes BETWEEN 90 AND 400 THEN TRUE
+        ELSE FALSE
+    END AS duration_valid,
+    CASE
+        WHEN start_hole IS NULL THEN FALSE
+        WHEN min_hole IS NULL THEN FALSE
+        WHEN start_hole > 1 AND min_hole = start_hole THEN TRUE
+        WHEN start_hole = 1 AND min_hole = 1 THEN TRUE
+        ELSE FALSE
+    END AS sequence_valid,
+    CASE
+        WHEN real_events < 10 THEN FALSE
+        WHEN is_nine_hole = 1 AND real_events >= 9 THEN TRUE
+        WHEN is_nine_hole = 0 AND real_events >= 18 THEN TRUE
+        ELSE FALSE
+    END AS events_valid,
+    CASE
+        WHEN events_with_pace = 0 THEN FALSE
+        WHEN CAST(events_with_pace AS DOUBLE) / NULLIF(real_events, 0) >= 0.5 THEN TRUE
+        ELSE FALSE
+    END AS pace_valid
+FROM round_stats
+ORDER BY round_id
+"""
+
+
+ROUND_VALIDATION_SUMMARY = """
+-- Summary of round validation by course
+WITH validations AS (
+    SELECT
+        course_id,
+        round_id,
+        round_duration_minutes,
+        is_nine_hole,
+        is_complete,
+        real_events,
+        events_with_pace,
+        -- Duration valid
+        CASE
+            WHEN round_duration_minutes IS NULL THEN 0
+            WHEN is_nine_hole AND round_duration_minutes BETWEEN 45 AND 200 THEN 1
+            WHEN NOT is_nine_hole AND round_duration_minutes BETWEEN 90 AND 400 THEN 1
+            ELSE 0
+        END AS duration_valid,
+        -- Events valid
+        CASE
+            WHEN real_events < 10 THEN 0
+            WHEN is_nine_hole AND real_events >= 9 THEN 1
+            WHEN NOT is_nine_hole AND real_events >= 18 THEN 1
+            ELSE 0
+        END AS events_valid,
+        -- Pace valid
+        CASE
+            WHEN events_with_pace = 0 THEN 0
+            WHEN CAST(events_with_pace AS DOUBLE) / NULLIF(real_events, 0) >= 0.5 THEN 1
+            ELSE 0
+        END AS pace_valid
+    FROM (
+        SELECT
+            course_id,
+            round_id,
+            MAX(round_duration_minutes) AS round_duration_minutes,
+            MAX(CAST(is_nine_hole AS INTEGER)) = 1 AS is_nine_hole,
+            MAX(CAST(is_complete AS INTEGER)) = 1 AS is_complete,
+            SUM(CASE WHEN is_location_padding = FALSE THEN 1 ELSE 0 END) AS real_events,
+            SUM(CASE WHEN pace IS NOT NULL THEN 1 ELSE 0 END) AS events_with_pace
+        FROM iceberg.silver.fact_telemetry_event
+        GROUP BY course_id, round_id
+    )
+)
+SELECT
+    course_id,
+    COUNT(*) AS total_rounds,
+    SUM(duration_valid) AS rounds_duration_valid,
+    SUM(events_valid) AS rounds_events_valid,
+    SUM(pace_valid) AS rounds_pace_valid,
+    ROUND(100.0 * SUM(duration_valid) / COUNT(*), 1) AS pct_duration_valid,
+    ROUND(100.0 * SUM(events_valid) / COUNT(*), 1) AS pct_events_valid,
+    ROUND(100.0 * SUM(pace_valid) / COUNT(*), 1) AS pct_pace_valid
+FROM validations
+GROUP BY course_id
+ORDER BY course_id
+"""
+
+# =============================================================================
+# ROUND DURATION ANALYSIS (FOR OUTLIER DETECTION)
+# =============================================================================
+
+ROUND_DURATION_DETAILS = """
+-- Detailed round duration for distribution and outlier analysis
+WITH round_stats AS (
+    SELECT
+        course_id,
+        round_id,
+        MAX(round_duration_minutes) AS duration_minutes,
+        MAX(CAST(is_nine_hole AS INTEGER)) = 1 AS is_nine_hole,
+        COUNT(DISTINCT hole_number) AS holes_visited,
+        MIN(event_date) AS round_date
+    FROM iceberg.silver.fact_telemetry_event
+    WHERE is_location_padding = FALSE
+    GROUP BY course_id, round_id
+)
+SELECT
+    course_id,
+    round_id,
+    round_date,
+    duration_minutes,
+    is_nine_hole,
+    holes_visited,
+    CASE WHEN is_nine_hole THEN '9-hole' ELSE '18-hole' END AS round_type
+FROM round_stats
+WHERE duration_minutes IS NOT NULL
+  AND duration_minutes > 0
+  AND duration_minutes < 600
+ORDER BY course_id, round_date DESC
+"""
+
+
+def get_round_duration_for_course(course_id: str) -> str:
+    """Get round duration details for a specific course."""
+    safe_course_id = course_id.replace("'", "''")
+    return f"""
+WITH round_stats AS (
+    SELECT
+        course_id,
+        round_id,
+        MAX(round_duration_minutes) AS duration_minutes,
+        MAX(CAST(is_nine_hole AS INTEGER)) = 1 AS is_nine_hole,
+        COUNT(DISTINCT hole_number) AS holes_visited,
+        MIN(event_date) AS round_date
+    FROM iceberg.silver.fact_telemetry_event
+    WHERE is_location_padding = FALSE
+      AND course_id = '{safe_course_id}'
+    GROUP BY course_id, round_id
+)
+SELECT
+    course_id,
+    round_id,
+    round_date,
+    duration_minutes,
+    is_nine_hole,
+    holes_visited,
+    CASE WHEN is_nine_hole THEN '9-hole' ELSE '18-hole' END AS round_type
+FROM round_stats
+WHERE duration_minutes IS NOT NULL
+  AND duration_minutes > 0
+  AND duration_minutes < 600
+ORDER BY round_date DESC
+"""
+
+
+# =============================================================================
+# HOLE DURATION ANALYSIS
+# =============================================================================
+
+
+def get_hole_duration_for_course(course_id: str) -> str:
+    """Get per-hole duration statistics for a course."""
+    safe_course_id = course_id.replace("'", "''")
+    return f"""
+WITH hole_times AS (
+    SELECT
+        course_id,
+        round_id,
+        hole_number,
+        MIN(fix_timestamp) AS hole_start,
+        MAX(fix_timestamp) AS hole_end
+    FROM iceberg.silver.fact_telemetry_event
+    WHERE is_location_padding = FALSE
+      AND course_id = '{safe_course_id}'
+      AND hole_number IS NOT NULL
+      AND fix_timestamp IS NOT NULL
+    GROUP BY course_id, round_id, hole_number
+),
+hole_durations AS (
+    SELECT
+        course_id,
+        round_id,
+        hole_number,
+        date_diff('minute', hole_start, hole_end) AS hole_duration_minutes
+    FROM hole_times
+    WHERE hole_start IS NOT NULL AND hole_end IS NOT NULL
+)
+SELECT
+    hole_number,
+    COUNT(*) AS sample_count,
+    ROUND(AVG(hole_duration_minutes), 1) AS avg_duration_min,
+    ROUND(APPROX_PERCENTILE(hole_duration_minutes, 0.5), 1) AS median_duration_min,
+    MIN(hole_duration_minutes) AS min_duration_min,
+    MAX(hole_duration_minutes) AS max_duration_min,
+    ROUND(STDDEV(hole_duration_minutes), 1) AS stddev_duration
+FROM hole_durations
+WHERE hole_duration_minutes > 0 AND hole_duration_minutes < 60
+GROUP BY hole_number
+ORDER BY hole_number
+"""
+
+
+# =============================================================================
+# ROUND PROGRESSION ANALYSIS
+# =============================================================================
+
+
+def get_round_progression(course_id: str, round_id: str) -> str:
+    """Get detailed progression data for a specific round to analyze sequence."""
+    safe_course_id = course_id.replace("'", "''")
+    safe_round_id = round_id.replace("'", "''")
+    return f"""
+SELECT
+    location_index,
+    nine_number,
+    hole_number,
+    section_number,
+    fix_timestamp,
+    pace,
+    is_location_padding,
+    ROW_NUMBER() OVER (ORDER BY location_index) AS event_sequence,
+    LAG(hole_number) OVER (ORDER BY location_index) AS prev_hole,
+    LAG(section_number) OVER (ORDER BY location_index) AS prev_section,
+    CASE
+        WHEN LAG(hole_number) OVER (ORDER BY location_index) IS NULL THEN 'start'
+        WHEN hole_number = LAG(hole_number) OVER (ORDER BY location_index) THEN 'same_hole'
+        WHEN hole_number = LAG(hole_number) OVER (ORDER BY location_index) + 1 THEN 'next_hole'
+        WHEN hole_number < LAG(hole_number) OVER (ORDER BY location_index) THEN 'backwards'
+        ELSE 'skip'
+    END AS hole_transition,
+    CASE
+        WHEN LAG(section_number) OVER (ORDER BY location_index) IS NULL THEN 'start'
+        WHEN section_number = LAG(section_number) OVER (ORDER BY location_index) THEN 'same_section'
+        WHEN section_number = LAG(section_number) OVER (ORDER BY location_index) + 1 THEN 'next_section'
+        WHEN section_number < LAG(section_number) OVER (ORDER BY location_index) THEN 'backwards'
+        ELSE 'skip'
+    END AS section_transition
+FROM iceberg.silver.fact_telemetry_event
+WHERE course_id = '{safe_course_id}'
+  AND round_id = '{safe_round_id}'
+  AND is_location_padding = FALSE
+ORDER BY location_index
+"""
+
+
+def get_round_map_points(course_id: str, round_id: str) -> str:
+    """Get GPS points for a specific round to visualize on a map."""
+    safe_course_id = course_id.replace("'", "''")
+    safe_round_id = round_id.replace("'", "''")
+    return f"""
+SELECT
+    location_index,
+    latitude,
+    longitude,
+    nine_number,
+    hole_number,
+    section_number,
+    fix_timestamp,
+    pace,
+    ROW_NUMBER() OVER (ORDER BY location_index) AS event_sequence
+FROM iceberg.silver.fact_telemetry_event
+WHERE course_id = '{safe_course_id}'
+  AND round_id = '{safe_round_id}'
+  AND is_location_padding = FALSE
+  AND latitude IS NOT NULL
+  AND longitude IS NOT NULL
+ORDER BY location_index
+"""
+
+
+def get_round_progression_summary(course_id: str) -> str:
+    """Get progression quality summary for all rounds in a course."""
+    safe_course_id = course_id.replace("'", "''")
+    return f"""
+WITH round_transitions AS (
+    SELECT
+        course_id,
+        round_id,
+        location_index,
+        hole_number,
+        section_number,
+        LAG(hole_number) OVER (PARTITION BY round_id ORDER BY location_index) AS prev_hole,
+        LAG(section_number) OVER (PARTITION BY round_id ORDER BY location_index) AS prev_section
+    FROM iceberg.silver.fact_telemetry_event
+    WHERE course_id = '{safe_course_id}'
+      AND is_location_padding = FALSE
+      AND hole_number IS NOT NULL
+      AND section_number IS NOT NULL
+),
+transition_analysis AS (
+    SELECT
+        round_id,
+        COUNT(*) AS total_events,
+        SUM(CASE WHEN prev_hole IS NULL THEN 0
+                 WHEN hole_number = prev_hole THEN 0
+                 WHEN hole_number = prev_hole + 1 THEN 0
+                 WHEN hole_number < prev_hole THEN 1
+                 ELSE 1 END) AS hole_anomalies,
+        SUM(CASE WHEN prev_section IS NULL THEN 0
+                 WHEN section_number = prev_section THEN 0
+                 WHEN section_number = prev_section + 1 THEN 0
+                 WHEN section_number < prev_section THEN 1
+                 ELSE 1 END) AS section_anomalies,
+        MIN(hole_number) AS start_hole,
+        MAX(hole_number) AS end_hole,
+        COUNT(DISTINCT hole_number) AS holes_visited
+    FROM round_transitions
+    GROUP BY round_id
+)
+SELECT
+    round_id,
+    total_events,
+    start_hole,
+    end_hole,
+    holes_visited,
+    hole_anomalies,
+    section_anomalies,
+    ROUND(100.0 * hole_anomalies / NULLIF(total_events, 0), 1) AS hole_anomaly_pct,
+    ROUND(100.0 * section_anomalies / NULLIF(total_events, 0), 1) AS section_anomaly_pct,
+    CASE
+        WHEN hole_anomalies = 0 AND section_anomalies = 0 THEN 'clean'
+        WHEN hole_anomalies <= 2 AND section_anomalies <= 5 THEN 'minor_issues'
+        ELSE 'needs_review'
+    END AS progression_quality
+FROM transition_analysis
+ORDER BY hole_anomalies DESC, section_anomalies DESC
+"""
+
+
+# =============================================================================
+# GLOBAL METRICS QUERIES (CROSS-COURSE INSIGHTS)
+# =============================================================================
+# These queries demonstrate the power of having all data in a single lakehouse
+# vs siloed MongoDB databases per course.
+
+GLOBAL_OVERVIEW = """
+-- Global overview: aggregate stats across ALL courses
+-- This query is IMPOSSIBLE with siloed databases!
+SELECT
+    COUNT(DISTINCT course_id) AS total_courses,
+    COUNT(DISTINCT round_id) AS total_rounds,
+    COUNT(*) AS total_events,
+    SUM(CASE WHEN is_location_padding = FALSE THEN 1 ELSE 0 END) AS real_events,
+    COUNT(DISTINCT device) AS unique_devices,
+    MIN(event_date) AS earliest_date,
+    MAX(event_date) AS latest_date,
+    COUNT(DISTINCT event_date) AS total_playing_days,
+    ROUND(AVG(pace), 1) AS global_avg_pace,
+    ROUND(AVG(battery_percentage), 1) AS global_avg_battery
+FROM iceberg.silver.fact_telemetry_event
+WHERE is_location_padding = FALSE
+"""
+
+GLOBAL_PACE_COMPARISON = """
+-- Compare pace metrics across ALL courses
+-- Enables benchmarking that was impossible before
+SELECT
+    course_id,
+    COUNT(DISTINCT round_id) AS round_count,
+    ROUND(AVG(pace), 1) AS avg_pace,
+    ROUND(APPROX_PERCENTILE(pace, 0.5), 1) AS median_pace,
+    ROUND(MIN(pace), 1) AS min_pace,
+    ROUND(MAX(pace), 1) AS max_pace,
+    ROUND(STDDEV(pace), 1) AS pace_stddev,
+    ROUND(AVG(pace_gap), 1) AS avg_pace_gap
+FROM iceberg.silver.fact_telemetry_event
+WHERE is_location_padding = FALSE
+  AND pace IS NOT NULL
+  AND pace > 0
+  AND pace < 600  -- Filter unrealistic values
+GROUP BY course_id
+ORDER BY avg_pace
+"""
+
+GLOBAL_ROUND_DURATION_COMPARISON = """
+-- Compare round durations across ALL courses
+-- See which courses play faster/slower
+WITH round_durations AS (
+    SELECT
+        course_id,
+        round_id,
+        MAX(round_duration_minutes) AS duration_minutes,
+        MAX(CAST(is_nine_hole AS INTEGER)) = 1 AS is_nine_hole
+    FROM iceberg.silver.fact_telemetry_event
+    WHERE is_location_padding = FALSE
+      AND round_duration_minutes IS NOT NULL
+      AND round_duration_minutes > 30
+      AND round_duration_minutes < 480
+    GROUP BY course_id, round_id
+)
+SELECT
+    course_id,
+    COUNT(*) AS round_count,
+    ROUND(AVG(duration_minutes), 0) AS avg_duration_min,
+    ROUND(APPROX_PERCENTILE(duration_minutes, 0.5), 0) AS median_duration_min,
+    ROUND(MIN(duration_minutes), 0) AS min_duration_min,
+    ROUND(MAX(duration_minutes), 0) AS max_duration_min,
+    ROUND(STDDEV(duration_minutes), 0) AS duration_stddev,
+    SUM(CASE WHEN is_nine_hole THEN 1 ELSE 0 END) AS nine_hole_rounds,
+    SUM(CASE WHEN NOT is_nine_hole THEN 1 ELSE 0 END) AS full_rounds
+FROM round_durations
+GROUP BY course_id
+ORDER BY avg_duration_min
+"""
+
+GLOBAL_WEEKDAY_HEATMAP = """
+-- Rounds by weekday across ALL courses
+-- Discover global patterns in play behavior
+SELECT
+    course_id,
+    event_weekday,
+    COUNT(DISTINCT round_id) AS round_count
+FROM iceberg.silver.fact_telemetry_event
+WHERE is_location_padding = FALSE
+  AND event_weekday IS NOT NULL
+GROUP BY course_id, event_weekday
+ORDER BY course_id, event_weekday
+"""
+
+GLOBAL_HOURLY_DISTRIBUTION = """
+-- Rounds by hour of day across ALL courses
+-- When do golfers tee off globally?
+SELECT
+    course_id,
+    HOUR(round_start_time) AS start_hour,
+    COUNT(DISTINCT round_id) AS round_count
+FROM iceberg.silver.fact_telemetry_event
+WHERE is_location_padding = FALSE
+  AND round_start_time IS NOT NULL
+GROUP BY course_id, HOUR(round_start_time)
+ORDER BY course_id, start_hour
+"""
+
+GLOBAL_DATA_QUALITY_RANKING = """
+-- Rank courses by data quality score
+-- Identify which courses need attention
+WITH quality_metrics AS (
+    SELECT
+        course_id,
+        COUNT(*) AS total_events,
+        ROUND(100.0 * SUM(CASE WHEN pace IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS pace_completeness,
+        ROUND(100.0 * SUM(CASE WHEN latitude IS NOT NULL AND longitude IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS gps_completeness,
+        ROUND(100.0 * SUM(CASE WHEN hole_number IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS hole_completeness,
+        ROUND(100.0 * SUM(CASE WHEN fix_timestamp IS NOT NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 1) AS timestamp_completeness
+    FROM iceberg.silver.fact_telemetry_event
+    WHERE is_location_padding = FALSE
     GROUP BY course_id
 )
 SELECT
     course_id,
-    total_rounds,
-    likely_course_type,
-    max_section_seen,
-    max_holes_in_round,
-    ROUND(100.0 * complete_rounds / NULLIF(total_rounds, 0), 1) AS pct_complete,
-    ROUND(100.0 * incomplete_rounds / NULLIF(total_rounds, 0), 1) AS pct_incomplete,
-    ROUND(100.0 * nine_hole_rounds / NULLIF(total_rounds, 0), 1) AS pct_nine_hole,
-    ROUND(100.0 * full_rounds / NULLIF(total_rounds, 0), 1) AS pct_full_rounds,
-    unique_start_holes,
-    ROUND(100.0 * shotgun_start_rounds / NULLIF(total_rounds, 0), 1) AS pct_shotgun_starts,
-    CASE WHEN likely_course_type = '27-hole' THEN
-        ROUND(100.0 * single_nine_rounds / NULLIF(total_rounds, 0), 1)
-    END AS pct_single_nine,
-    CASE WHEN likely_course_type = '27-hole' THEN
-        ROUND(100.0 * two_nine_rounds / NULLIF(total_rounds, 0), 1)
-    END AS pct_two_nines,
-    CASE WHEN likely_course_type = '27-hole' THEN
-        ROUND(100.0 * three_nine_rounds / NULLIF(total_rounds, 0), 1)
-    END AS pct_all_three_nines,
-    avg_locations_per_round,
-    min_locations_per_round,
-    max_locations_per_round,
-    ROUND(
-        unique_start_holes * 10 +
-        CASE likely_course_type 
-            WHEN '27-hole' THEN 30 
-            WHEN '18-hole' THEN 20 
-            ELSE 10 
-        END +
-        CASE WHEN 100.0 * nine_hole_rounds / NULLIF(total_rounds, 0) > 20 THEN 10 ELSE 0 END +
-        CASE WHEN 100.0 * incomplete_rounds / NULLIF(total_rounds, 0) > 10 THEN 5 ELSE 0 END
-    , 0) AS course_complexity_score
-FROM course_summary
-ORDER BY course_complexity_score DESC
+    total_events,
+    pace_completeness,
+    gps_completeness,
+    hole_completeness,
+    timestamp_completeness,
+    ROUND((pace_completeness + gps_completeness + hole_completeness + timestamp_completeness) / 4, 1) AS avg_quality_score,
+    RANK() OVER (ORDER BY (pace_completeness + gps_completeness + hole_completeness + timestamp_completeness) / 4 DESC) AS quality_rank
+FROM quality_metrics
+ORDER BY quality_rank
 """
 
-DBT_PACE_SUMMARY = """
--- dbt model: pipeline/gold/models/gold/pace_summary_by_round.sql
--- This is the transformation from silver -> gold
-WITH base AS (
+GLOBAL_DEVICE_FLEET = """
+-- Device fleet analysis across ALL courses
+-- Understand device distribution and health globally
+SELECT
+    course_id,
+    COUNT(DISTINCT device) AS unique_devices,
+    COUNT(DISTINCT round_id) AS rounds_tracked,
+    ROUND(CAST(COUNT(DISTINCT round_id) AS DOUBLE) / NULLIF(COUNT(DISTINCT device), 0), 1) AS rounds_per_device,
+    ROUND(AVG(battery_percentage), 1) AS avg_battery,
+    ROUND(MIN(battery_percentage), 1) AS min_battery,
+    SUM(CASE WHEN battery_percentage < 20 THEN 1 ELSE 0 END) AS low_battery_events,
+    SUM(CASE WHEN is_problem = TRUE THEN 1 ELSE 0 END) AS problem_events
+FROM iceberg.silver.fact_telemetry_event
+WHERE is_location_padding = FALSE
+GROUP BY course_id
+ORDER BY unique_devices DESC
+"""
+
+GLOBAL_MONTHLY_TREND = """
+-- Monthly round trends across ALL courses
+-- See seasonality patterns globally
+SELECT
+    event_year,
+    event_month,
+    course_id,
+    COUNT(DISTINCT round_id) AS round_count
+FROM iceberg.silver.fact_telemetry_event
+WHERE is_location_padding = FALSE
+  AND event_year IS NOT NULL
+  AND event_month IS NOT NULL
+GROUP BY event_year, event_month, course_id
+ORDER BY event_year, event_month, course_id
+"""
+
+GLOBAL_COMPLETION_RATES = """
+-- Round completion rates across ALL courses
+-- Which courses have the most complete rounds?
+WITH round_stats AS (
     SELECT
         course_id,
         round_id,
-        MIN(fix_timestamp) AS round_start_ts,
-        MAX(fix_timestamp) AS round_end_ts,
-        COUNT(*) AS fix_count,
-        AVG(pace) AS avg_pace,
-        AVG(pace_gap) AS avg_pace_gap,
-        AVG(positional_gap) AS avg_positional_gap
+        MAX(CAST(is_complete AS INTEGER)) AS is_complete,
+        COUNT(DISTINCT hole_number) AS holes_visited,
+        MAX(CAST(is_nine_hole AS INTEGER)) AS is_nine_hole
     FROM iceberg.silver.fact_telemetry_event
     WHERE is_location_padding = FALSE
     GROUP BY course_id, round_id
 )
 SELECT
     course_id,
-    round_id,
-    round_start_ts,
-    round_end_ts,
-    fix_count,
-    avg_pace,
-    avg_pace_gap,
-    avg_positional_gap
-FROM base
+    COUNT(*) AS total_rounds,
+    SUM(is_complete) AS complete_rounds,
+    ROUND(100.0 * SUM(is_complete) / NULLIF(COUNT(*), 0), 1) AS completion_rate,
+    ROUND(AVG(holes_visited), 1) AS avg_holes_visited,
+    SUM(is_nine_hole) AS nine_hole_rounds,
+    SUM(CASE WHEN is_nine_hole = 0 THEN 1 ELSE 0 END) AS eighteen_hole_rounds
+FROM round_stats
+GROUP BY course_id
+ORDER BY completion_rate DESC
 """
 
-DBT_SIGNAL_QUALITY = """
--- dbt model: pipeline/gold/models/gold/signal_quality_rounds.sql
--- This is the transformation from silver -> gold
-WITH base AS (
+# =============================================================================
+# PACE ANALYSIS QUERIES
+# =============================================================================
+
+PACE_BY_HOLE = """
+-- Average pace by hole for each course
+-- Identifies bottleneck holes (slower than course average)
+WITH hole_pace AS (
     SELECT
         course_id,
-        round_id,
-        COUNT(*) AS fix_count,
-        SUM(CASE WHEN is_projected THEN 1 ELSE 0 END) AS projected_fix_count,
-        SUM(CASE WHEN is_problem THEN 1 ELSE 0 END) AS problem_fix_count
+        hole_number,
+        pace,
+        round_id
     FROM iceberg.silver.fact_telemetry_event
     WHERE is_location_padding = FALSE
-    GROUP BY course_id, round_id
+      AND pace IS NOT NULL
+      AND pace > 0
+      AND pace < 60  -- Filter unrealistic values (> 1 hour per hole)
+      AND hole_number IS NOT NULL
+),
+course_avg AS (
+    SELECT
+        course_id,
+        ROUND(AVG(pace), 1) AS course_avg_pace
+    FROM hole_pace
+    GROUP BY course_id
+)
+SELECT
+    hp.course_id,
+    hp.hole_number,
+    COUNT(DISTINCT hp.round_id) AS sample_rounds,
+    COUNT(*) AS sample_events,
+    ROUND(AVG(hp.pace), 1) AS avg_pace,
+    ROUND(APPROX_PERCENTILE(hp.pace, 0.5), 1) AS median_pace,
+    ROUND(MIN(hp.pace), 1) AS min_pace,
+    ROUND(MAX(hp.pace), 1) AS max_pace,
+    ROUND(STDDEV(hp.pace), 1) AS pace_stddev,
+    ca.course_avg_pace,
+    ROUND(AVG(hp.pace) - ca.course_avg_pace, 1) AS pace_vs_avg,
+    CASE
+        WHEN AVG(hp.pace) > ca.course_avg_pace * 1.15 THEN 'bottleneck'
+        WHEN AVG(hp.pace) < ca.course_avg_pace * 0.85 THEN 'fast'
+        ELSE 'normal'
+    END AS hole_category
+FROM hole_pace hp
+JOIN course_avg ca ON hp.course_id = ca.course_id
+GROUP BY hp.course_id, hp.hole_number, ca.course_avg_pace
+ORDER BY hp.course_id, hp.hole_number
+"""
+
+
+def get_pace_by_hole_for_course(course_id: str) -> str:
+    """Get pace by hole for a specific course."""
+    safe_course_id = course_id.replace("'", "''")
+    return f"""
+WITH hole_pace AS (
+    SELECT
+        course_id,
+        hole_number,
+        pace,
+        round_id
+    FROM iceberg.silver.fact_telemetry_event
+    WHERE is_location_padding = FALSE
+      AND pace IS NOT NULL
+      AND pace > 0
+      AND pace < 60
+      AND hole_number IS NOT NULL
+      AND course_id = '{safe_course_id}'
+),
+course_avg AS (
+    SELECT
+        course_id,
+        ROUND(AVG(pace), 1) AS course_avg_pace
+    FROM hole_pace
+    GROUP BY course_id
+)
+SELECT
+    hp.course_id,
+    hp.hole_number,
+    COUNT(DISTINCT hp.round_id) AS sample_rounds,
+    COUNT(*) AS sample_events,
+    ROUND(AVG(hp.pace), 1) AS avg_pace,
+    ROUND(APPROX_PERCENTILE(hp.pace, 0.5), 1) AS median_pace,
+    ROUND(MIN(hp.pace), 1) AS min_pace,
+    ROUND(MAX(hp.pace), 1) AS max_pace,
+    ROUND(STDDEV(hp.pace), 1) AS pace_stddev,
+    ca.course_avg_pace,
+    ROUND(AVG(hp.pace) - ca.course_avg_pace, 1) AS pace_vs_avg,
+    CASE
+        WHEN AVG(hp.pace) > ca.course_avg_pace * 1.15 THEN 'bottleneck'
+        WHEN AVG(hp.pace) < ca.course_avg_pace * 0.85 THEN 'fast'
+        ELSE 'normal'
+    END AS hole_category
+FROM hole_pace hp
+JOIN course_avg ca ON hp.course_id = ca.course_id
+GROUP BY hp.course_id, hp.hole_number, ca.course_avg_pace
+ORDER BY hp.hole_number
+"""
+
+
+PACE_BY_SECTION = """
+-- Average pace by section for each course
+-- More granular bottleneck detection
+SELECT
+    course_id,
+    hole_number,
+    section_number,
+    COUNT(DISTINCT round_id) AS sample_rounds,
+    ROUND(AVG(pace), 1) AS avg_pace,
+    ROUND(APPROX_PERCENTILE(pace, 0.5), 1) AS median_pace
+FROM iceberg.silver.fact_telemetry_event
+WHERE is_location_padding = FALSE
+  AND pace IS NOT NULL
+  AND pace > 0
+  AND pace < 60
+  AND hole_number IS NOT NULL
+  AND section_number IS NOT NULL
+GROUP BY course_id, hole_number, section_number
+ORDER BY course_id, hole_number, section_number
+"""
+
+
+def get_pace_by_section_for_course(course_id: str) -> str:
+    """Get pace by section for a specific course."""
+    safe_course_id = course_id.replace("'", "''")
+    return f"""
+SELECT
+    course_id,
+    hole_number,
+    section_number,
+    COUNT(DISTINCT round_id) AS sample_rounds,
+    ROUND(AVG(pace), 1) AS avg_pace,
+    ROUND(APPROX_PERCENTILE(pace, 0.5), 1) AS median_pace
+FROM iceberg.silver.fact_telemetry_event
+WHERE is_location_padding = FALSE
+  AND pace IS NOT NULL
+  AND pace > 0
+  AND pace < 60
+  AND hole_number IS NOT NULL
+  AND section_number IS NOT NULL
+  AND course_id = '{safe_course_id}'
+GROUP BY course_id, hole_number, section_number
+ORDER BY hole_number, section_number
+"""
+
+
+# Special query for 9-hole loop courses (like American Falls)
+# Compares pace on the same hole between first nine and second nine
+def get_nine_loop_pace_comparison(course_id: str) -> str:
+    """Compare pace on the same hole between first and second nine for loop courses.
+
+    For 9-hole courses that allow 18-hole rounds (playing the same 9 holes twice),
+    this compares pace on each hole during the first pass vs second pass.
+
+    Uses nine_number field: nine_number=1 is first pass, nine_number=2 is second pass.
+    Filters for 18-hole rounds only (is_nine_hole = FALSE).
+    """
+    safe_course_id = course_id.replace("'", "''")
+    return f"""
+-- Get pace data from 18-hole rounds only, using nine_number to distinguish passes
+-- nine_number=1 = first nine (first pass through holes 1-9)
+-- nine_number=2 = second nine (second pass through holes 1-9)
+SELECT
+    hole_number,
+    nine_number,
+    CASE 
+        WHEN nine_number = 1 THEN 'first_nine'
+        WHEN nine_number = 2 THEN 'second_nine'
+        ELSE 'nine_' || CAST(nine_number AS VARCHAR)
+    END AS pass_number,
+    COUNT(DISTINCT round_id) AS sample_rounds,
+    COUNT(*) AS sample_events,
+    ROUND(AVG(pace), 1) AS avg_pace,
+    ROUND(APPROX_PERCENTILE(pace, 0.5), 1) AS median_pace,
+    ROUND(MIN(pace), 1) AS min_pace,
+    ROUND(MAX(pace), 1) AS max_pace,
+    ROUND(STDDEV(pace), 1) AS pace_stddev
+FROM iceberg.silver.fact_telemetry_event
+WHERE is_location_padding = FALSE
+  AND course_id = '{safe_course_id}'
+  AND is_nine_hole = FALSE  -- Only 18-hole rounds
+  AND pace IS NOT NULL
+  AND pace > 0
+  AND pace < 60
+  AND hole_number IS NOT NULL
+  AND nine_number IS NOT NULL
+GROUP BY hole_number, nine_number
+ORDER BY hole_number, nine_number
+"""
+
+
+def get_pace_comparison_for_hole(course_id: str, hole_number: int) -> str:
+    """Get detailed pace comparison for a specific hole between first and second nine."""
+    safe_course_id = course_id.replace("'", "''")
+    return f"""
+-- Get pace data for a specific hole from 18-hole rounds only
+SELECT
+    round_id,
+    nine_number,
+    CASE 
+        WHEN nine_number = 1 THEN 'first_nine'
+        WHEN nine_number = 2 THEN 'second_nine'
+        ELSE 'nine_' || CAST(nine_number AS VARCHAR)
+    END AS pass_number,
+    pace,
+    fix_timestamp
+FROM iceberg.silver.fact_telemetry_event
+WHERE is_location_padding = FALSE
+  AND course_id = '{safe_course_id}'
+  AND is_nine_hole = FALSE  -- Only 18-hole rounds
+  AND pace IS NOT NULL
+  AND pace > 0
+  AND pace < 60
+  AND hole_number = {hole_number}
+  AND nine_number IS NOT NULL
+ORDER BY round_id, fix_timestamp
+"""
+
+
+BOTTLENECK_SUMMARY = """
+-- Summary of bottleneck holes across all courses
+WITH hole_pace AS (
+    SELECT
+        course_id,
+        hole_number,
+        pace
+    FROM iceberg.silver.fact_telemetry_event
+    WHERE is_location_padding = FALSE
+      AND pace IS NOT NULL
+      AND pace > 0
+      AND pace < 60
+      AND hole_number IS NOT NULL
+),
+course_avg AS (
+    SELECT
+        course_id,
+        AVG(pace) AS course_avg_pace
+    FROM hole_pace
+    GROUP BY course_id
+),
+hole_stats AS (
+    SELECT
+        hp.course_id,
+        hp.hole_number,
+        AVG(hp.pace) AS avg_pace,
+        ca.course_avg_pace
+    FROM hole_pace hp
+    JOIN course_avg ca ON hp.course_id = ca.course_id
+    GROUP BY hp.course_id, hp.hole_number, ca.course_avg_pace
 )
 SELECT
     course_id,
-    round_id,
-    fix_count,
-    projected_fix_count,
-    problem_fix_count,
-    CAST(projected_fix_count AS DOUBLE) / NULLIF(fix_count, 0) AS projected_rate,
-    CAST(problem_fix_count AS DOUBLE) / NULLIF(fix_count, 0) AS problem_rate
-FROM base
+    COUNT(*) AS total_holes,
+    SUM(CASE WHEN avg_pace > course_avg_pace * 1.15 THEN 1 ELSE 0 END) AS bottleneck_holes,
+    SUM(CASE WHEN avg_pace < course_avg_pace * 0.85 THEN 1 ELSE 0 END) AS fast_holes,
+    ROUND(AVG(course_avg_pace), 1) AS course_avg_pace,
+    ROUND(MAX(avg_pace), 1) AS slowest_hole_pace,
+    ROUND(MIN(avg_pace), 1) AS fastest_hole_pace
+FROM hole_stats
+GROUP BY course_id
+ORDER BY bottleneck_holes DESC
+"""
+
+# =============================================================================
+# INFRASTRUCTURE & SIZING QUERIES
+# =============================================================================
+
+INFRASTRUCTURE_STATS = """
+-- Infrastructure statistics for the lakehouse
+SELECT
+    COUNT(DISTINCT course_id) AS total_courses,
+    COUNT(DISTINCT round_id) AS total_rounds,
+    COUNT(*) AS total_events,
+    SUM(CASE WHEN is_location_padding = FALSE THEN 1 ELSE 0 END) AS real_events,
+    MIN(event_date) AS earliest_date,
+    MAX(event_date) AS latest_date,
+    COUNT(DISTINCT event_date) AS total_days,
+    COUNT(DISTINCT ingest_date) AS ingest_batches
+FROM iceberg.silver.fact_telemetry_event
+"""
+
+EVENTS_PER_COURSE = """
+-- Event counts and date ranges per course
+SELECT
+    course_id,
+    COUNT(DISTINCT round_id) AS rounds,
+    COUNT(*) AS total_events,
+    SUM(CASE WHEN is_location_padding = FALSE THEN 1 ELSE 0 END) AS real_events,
+    MIN(event_date) AS first_date,
+    MAX(event_date) AS last_date,
+    COUNT(DISTINCT event_date) AS playing_days,
+    ROUND(COUNT(*) * 1.0 / NULLIF(COUNT(DISTINCT round_id), 0), 0) AS avg_events_per_round
+FROM iceberg.silver.fact_telemetry_event
+GROUP BY course_id
+ORDER BY total_events DESC
+"""
+
+EVENTS_BY_MONTH = """
+-- Events by month for trend analysis
+SELECT
+    event_year,
+    event_month,
+    COUNT(DISTINCT course_id) AS courses_active,
+    COUNT(DISTINCT round_id) AS rounds,
+    COUNT(*) AS events
+FROM iceberg.silver.fact_telemetry_event
+WHERE event_year IS NOT NULL AND event_month IS NOT NULL
+GROUP BY event_year, event_month
+ORDER BY event_year, event_month
 """

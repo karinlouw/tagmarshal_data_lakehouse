@@ -528,14 +528,14 @@ def main():
         ).drop("facility_id", "section_start", "section_end")
 
         # Derive nine_number with priority:
-        # 1. current_nine from source (for 9-hole loop courses tracking loop 1 vs 2)
-        # 2. nine_number_topo from topology join
-        # 3. Fallback: derive from hole_number (for 18-hole courses)
-        # 4. Fallback: derive from section_number (for 27-hole courses)
+        # 1. nine_number_topo from topology join (most accurate - based on section ranges)
+        # 2. Fallback: derive from hole_number (for 18-hole courses without topology)
+        # 3. Fallback: derive from section_number (for 27-hole courses without topology)
+        # Note: We don't use current_nine as primary because it represents the player's
+        # selected nine (e.g., "playing the front nine today"), not physical location.
         telemetry_df = telemetry_df.withColumn(
             "nine_number",
             F.coalesce(
-                F.col("current_nine"),
                 F.col("nine_number_topo"),
                 nine_from_hole_number,
                 nine_from_section_number,

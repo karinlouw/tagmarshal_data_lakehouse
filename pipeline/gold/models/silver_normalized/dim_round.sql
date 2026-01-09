@@ -43,7 +43,7 @@ WITH base AS (
     WHERE course_id IS NOT NULL
       AND round_id IS NOT NULL
 ),
-rollup AS (
+round_rollup AS (
     SELECT
         course_id,
         round_id,
@@ -93,7 +93,7 @@ rollup AS (
 )
 SELECT
     *
-FROM rollup
+FROM round_rollup
 ORDER BY course_id, round_id
 
 

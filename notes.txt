@@ -79,3 +79,11 @@ Do people every play 9 on indian creek or the other one? This is on the standard
 Is there a scenarios where people play all 27 hokes in a round?
 
 Check dsequentiality of a round, in all the different way it starts.
+
+
+
+8 January! Code review with deepseek:
+- Parameter validation - Could be more robust with custom exceptions
+- Configuration - Should validate that required config values exist
+- Logging - Consider using Python's logging module instead of print
+- Documentation - Add docstrings for complex logic sections

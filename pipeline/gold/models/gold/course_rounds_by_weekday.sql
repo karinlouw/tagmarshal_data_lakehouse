@@ -2,15 +2,14 @@
 
 -- Course seasonality (weekday)
 -- Counts rounds by the weekday of the round start timestamp.
+-- Uses `gold.fact_rounds` to avoid re-scanning fix-grain telemetry.
 
 WITH round_starts AS (
     SELECT
         course_id,
         round_id,
-        MIN(fix_timestamp) AS round_start_time
-    FROM {{ source('silver', 'fact_telemetry_event') }}
-    WHERE is_location_padding = FALSE
-    GROUP BY course_id, round_id
+        round_start_ts AS round_start_time
+    FROM {{ ref('fact_rounds') }}
 ),
 weekday AS (
     SELECT

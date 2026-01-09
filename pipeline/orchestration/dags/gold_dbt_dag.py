@@ -13,6 +13,7 @@ import boto3
 from airflow import DAG
 from airflow.operators.bash import BashOperator
 from airflow.operators.python import PythonOperator
+from airflow.utils.trigger_rule import TriggerRule
 
 
 def upload_gold_observability(**context):
@@ -33,7 +34,13 @@ def upload_gold_observability(**context):
         aws_secret_access_key=s3_secret_key,
     )
 
-    dbt_target = "/opt/tagmarshal/pipeline/gold/target"
+    # We keep separate target dirs to avoid artifacts clobbering each other:
+    # - dbt run writes run_results + manifest
+    # - dbt test writes its own run_results
+    # - dbt docs generate writes index.html + catalog + manifest
+    dbt_target_run = "/opt/tagmarshal/pipeline/gold/target-run"
+    dbt_target_test = "/opt/tagmarshal/pipeline/gold/target-test"
+    dbt_target_docs = "/opt/tagmarshal/pipeline/gold/target-docs"
     obs_prefix = f"gold/run_id={run_id}"
 
     print(f"\n{'='*60}")
@@ -43,70 +50,117 @@ def upload_gold_observability(**context):
     print(f"  DAG Run: {dag_run_id}")
     print("")
 
-    # Upload run_results.json (contains timing, row counts, success/failure)
-    run_results_path = f"{dbt_target}/run_results.json"
+    summary: dict = {
+        "run_id": run_id,
+        "dag_run_id": dag_run_id,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "models_success": 0,
+        "models_error": 0,
+        "tests_pass": 0,
+        "tests_fail": 0,
+        "tests_warn": 0,
+        "models": [],
+    }
+
+    # -----------------------
+    # dbt run artifacts
+    # -----------------------
+    run_results_path = f"{dbt_target_run}/run_results.json"
     if os.path.exists(run_results_path):
         with open(run_results_path, "r") as f:
             run_results = json.load(f)
 
-        # Extract summary stats
         models = run_results.get("results", [])
-        success_count = sum(1 for m in models if m.get("status") == "success")
-        error_count = sum(1 for m in models if m.get("status") == "error")
-        total_time = sum(m.get("execution_time", 0) for m in models)
-
-        # Create summary
-        summary = {
-            "run_id": run_id,
-            "dag_run_id": dag_run_id,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "dbt_version": run_results.get("metadata", {}).get("dbt_version"),
-            "elapsed_time": run_results.get("elapsed_time"),
-            "models_success": success_count,
-            "models_error": error_count,
-            "total_execution_time_sec": round(total_time, 2),
-            "models": [
-                {
-                    "name": m.get("unique_id", "").replace("model.tagmarshal.", ""),
-                    "status": m.get("status"),
-                    "execution_time_sec": round(m.get("execution_time", 0), 2),
-                    "rows_affected": m.get("adapter_response", {}).get("rows_affected"),
-                }
-                for m in models
-            ],
-        }
-
-        # Upload summary
-        summary_key = f"{obs_prefix}/summary.json"
-        s3.put_object(
-            Bucket=bucket_obs,
-            Key=summary_key,
-            Body=json.dumps(summary, indent=2),
-            ContentType="application/json",
+        summary["dbt_version"] = run_results.get("metadata", {}).get("dbt_version")
+        summary["elapsed_time"] = run_results.get("elapsed_time")
+        summary["models_success"] = sum(
+            1 for m in models if m.get("status") == "success"
         )
-        print(f"  ✅ Summary: s3://{bucket_obs}/{summary_key}")
+        summary["models_error"] = sum(1 for m in models if m.get("status") == "error")
+        total_time = sum(m.get("execution_time", 0) for m in models)
+        summary["total_execution_time_sec"] = round(total_time, 2)
+        summary["models"] = [
+            {
+                "name": m.get("unique_id", "")
+                .replace("model.tagmarshal_lakehouse.", "")
+                .replace("model.tagmarshal.", ""),
+                "status": m.get("status"),
+                "execution_time_sec": round(m.get("execution_time", 0), 2),
+                "rows_affected": m.get("adapter_response", {}).get("rows_affected"),
+            }
+            for m in models
+        ]
 
-        # Upload full run_results.json
-        results_key = f"{obs_prefix}/run_results.json"
+        results_key = f"{obs_prefix}/run/run_results.json"
         s3.upload_file(run_results_path, bucket_obs, results_key)
         print(f"  ✅ Run results: s3://{bucket_obs}/{results_key}")
-
-        # Print model stats
-        print("")
-        print("  📈 Model Results:")
-        for m in summary["models"]:
-            status_icon = "✅" if m["status"] == "success" else "❌"
-            rows = f"{m['rows_affected']} rows" if m["rows_affected"] else ""
-            print(f"     {status_icon} {m['name']}: {m['execution_time_sec']}s {rows}")
     else:
-        print(f"  ⚠️  No run_results.json found at {run_results_path}")
+        print(f"  ⚠️  No dbt run_results.json found at {run_results_path}")
 
-    # Upload manifest.json (model definitions, dependencies)
-    manifest_path = f"{dbt_target}/manifest.json"
+    manifest_path = f"{dbt_target_run}/manifest.json"
     if os.path.exists(manifest_path):
-        manifest_key = f"{obs_prefix}/manifest.json"
+        manifest_key = f"{obs_prefix}/run/manifest.json"
         s3.upload_file(manifest_path, bucket_obs, manifest_key)
-        print(f"  ✅ Manifest: s3://{bucket_obs}/{manifest_key}")
+        print(f"  ✅ Run manifest: s3://{bucket_obs}/{manifest_key}")
+
+    # -----------------------
+    # dbt test artifacts
+    # -----------------------
+    test_results_path = f"{dbt_target_test}/run_results.json"
+    if os.path.exists(test_results_path):
+        with open(test_results_path, "r") as f:
+            test_results = json.load(f)
+
+        results = test_results.get("results", [])
+        summary["tests_pass"] = sum(1 for r in results if r.get("status") == "pass")
+        summary["tests_fail"] = sum(1 for r in results if r.get("status") == "fail")
+        summary["tests_warn"] = sum(1 for r in results if r.get("status") == "warn")
+
+        test_key = f"{obs_prefix}/test/run_results.json"
+        s3.upload_file(test_results_path, bucket_obs, test_key)
+        print(f"  ✅ Test results: s3://{bucket_obs}/{test_key}")
+    else:
+        print(f"  ⚠️  No dbt test run_results.json found at {test_results_path}")
+
+    # -----------------------
+    # dbt docs artifacts
+    # -----------------------
+    docs_files = {
+        "index.html": "text/html",
+        "catalog.json": "application/json",
+        "manifest.json": "application/json",
+    }
+    docs_uploaded = 0
+    for filename, content_type in docs_files.items():
+        local_path = f"{dbt_target_docs}/{filename}"
+        if not os.path.exists(local_path):
+            continue
+        key = f"{obs_prefix}/docs/{filename}"
+        with open(local_path, "rb") as f:
+            s3.put_object(
+                Bucket=bucket_obs,
+                Key=key,
+                Body=f.read(),
+                ContentType=content_type,
+            )
+        docs_uploaded += 1
+        print(f"  ✅ Docs: s3://{bucket_obs}/{key}")
+
+    if docs_uploaded:
+        summary["docs_index_key"] = f"{obs_prefix}/docs/index.html"
+        summary["docs_url"] = (
+            f"http://localhost:9001/browser/{bucket_obs}/{obs_prefix}/docs/index.html"
+        )
+
+    # Upload summary last (includes run + test + docs pointers)
+    summary_key = f"{obs_prefix}/summary.json"
+    s3.put_object(
+        Bucket=bucket_obs,
+        Key=summary_key,
+        Body=json.dumps(summary, indent=2),
+        ContentType="application/json",
+    )
+    print(f"  ✅ Summary: s3://{bucket_obs}/{summary_key}")
 
     print(f"\n{'='*60}")
     print(
@@ -114,7 +168,14 @@ def upload_gold_observability(**context):
     )
     print(f"{'='*60}\n")
 
-    return {"run_id": run_id, "success": success_count, "error": error_count}
+    return {
+        "run_id": run_id,
+        "models_success": summary.get("models_success", 0),
+        "models_error": summary.get("models_error", 0),
+        "tests_pass": summary.get("tests_pass", 0),
+        "tests_fail": summary.get("tests_fail", 0),
+        "tests_warn": summary.get("tests_warn", 0),
+    }
 
 
 with DAG(
@@ -164,7 +225,19 @@ echo ""
 echo "  ⏳ Running Gold models..."
 # NOTE: Iceberg REST catalog uses SQLite by default in local dev, which can lock under concurrency.
 # Running dbt single-threaded avoids SQLITE_BUSY during catalog updates (e.g., temp table swaps).
-dbt run --threads 1 --select path:models/silver_normalized path:models/gold
+dbt run --threads 1 --target-path target-run --select path:models/silver_normalized path:models/gold
+
+echo ""
+echo "  🧊 Ensuring Iceberg partitioning (course_id) on key Gold tables..."
+dbt run-operation apply_gold_course_partitioning --args '{"models":["fact_rounds","fact_round_hole_performance","course_rounds_by_month","course_start_hole_distribution"]}'
+
+echo ""
+echo "  📚 Generating dbt docs..."
+dbt docs generate --threads 1 --target-path target-docs
+
+echo ""
+echo "  🧪 Running dbt tests (strict)..."
+dbt test --threads 1 --target-path target-test --select path:models/silver_normalized path:models/gold
 
 echo ""
 echo "✅ DBT RUN COMPLETE"
@@ -176,6 +249,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
     upload_obs = PythonOperator(
         task_id="upload_observability",
         python_callable=upload_gold_observability,
+        trigger_rule=TriggerRule.ALL_DONE,
     )
 
     dbt_run >> upload_obs

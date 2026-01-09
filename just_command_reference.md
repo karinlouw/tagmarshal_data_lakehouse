@@ -65,7 +65,7 @@ just silver-all 2024-06-15           # All courses, specific date
 |---------|-------------|
 | `just generate-topology` | Generate topology from Silver data |
 | `just seed-topology` | Load topology into Iceberg table |
-| `just topology-refresh` | Regenerate and seed topology (one-shot) |
+| `just topology` | Generate and seed topology (one-shot) |
 | `just seed-course-profile` | Seed course profile reference table |
 
 **Tables created:**

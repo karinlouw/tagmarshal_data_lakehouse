@@ -50,13 +50,22 @@ def create_iceberg_spark_session(
     
     # Get JAR configuration
     jars_config = get_spark_jars_config()
-    
-    # Set AWS environment variables for SDK (some JARs read these directly)
-    os.environ["AWS_REGION"] = config.s3_region
+
+    # IMPORTANT: Java's AWS SDK reads region from either:
+    # - Java system property: aws.region
+    # - process environment variables (AWS_REGION / AWS_DEFAULT_REGION)
+    #
+    # In PySpark, the JVM may be started before Python code runs, so mutating
+    # os.environ here is NOT reliably visible to the JVM (System.getenv).
+    #
+    # We still set env vars for consistency, but we *also* set Java system props
+    # via Spark driver/executor extraJavaOptions to make region resolution robust.
+    os.environ.setdefault("AWS_REGION", config.s3_region)
+    os.environ.setdefault("AWS_DEFAULT_REGION", config.s3_region)
     if config.s3_access_key:
-        os.environ["AWS_ACCESS_KEY_ID"] = config.s3_access_key
+        os.environ.setdefault("AWS_ACCESS_KEY_ID", config.s3_access_key)
     if config.s3_secret_key:
-        os.environ["AWS_SECRET_ACCESS_KEY"] = config.s3_secret_key
+        os.environ.setdefault("AWS_SECRET_ACCESS_KEY", config.s3_secret_key)
     
     # Build Spark session
     spark_builder = (
@@ -64,6 +73,9 @@ def create_iceberg_spark_session(
         .appName(app_name)
         .master(master)
         .config("spark.jars", jars_config)
+        # Ensure AWS region is visible to AWS SDK inside the JVM
+        .config("spark.driver.extraJavaOptions", f"-Daws.region={config.s3_region}")
+        .config("spark.executor.extraJavaOptions", f"-Daws.region={config.s3_region}")
         # Iceberg extensions
         .config(
             "spark.sql.extensions",

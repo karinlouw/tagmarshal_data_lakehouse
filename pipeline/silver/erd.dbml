@@ -1,141 +1,215 @@
-// Silver ERD (DBML) - for https://dbdiagram.io
-// This is documentation-only. It reflects the current Silver tables, and a
-// recommended normalized exploration model that maps cleanly to Silver.
+// Tagmarshal Lakehouse Entity Relationship Diagram (DBML)
+// For visualization: https://dbdiagram.io
+//
+// This ERD documents the physical Silver layer schema as implemented
+// in the ETL pipeline (pipeline/silver/etl.py).
 
-// ---------------------------------------------------------------------------
-// A) Current physical Silver model (as-built)
-// ---------------------------------------------------------------------------
+// =============================================================================
+// SILVER LAYER - FACT TABLE
+// =============================================================================
 
-Table silver_fact_telemetry_event {
-  round_id varchar [not null]
-  course_id varchar [not null]
-  ingest_date date [not null]
+Table fact_telemetry_event {
+  // === PRIMARY IDENTIFIERS ===
+  round_id varchar [not null, note: 'Unique round identifier (MongoDB _id from source)']
+  course_id varchar [not null, note: 'Course/facility identifier (e.g., americanfalls, bradshawfarmgc)']
+  ingest_date date [not null, note: 'Date data was ingested to Bronze layer']
+  location_index int [not null, note: 'Position in locations array (0-based, from CSV/JSON)']
 
-  fix_timestamp timestamp [null]
-  is_timestamp_missing boolean [not null]
+  // === GPS FIX DATA ===
+  fix_timestamp timestamp [null, note: 'When the GPS fix was recorded (derived from ISO date or round_start + offset)']
+  is_timestamp_missing boolean [not null, note: 'True when fix_timestamp could not be derived']
+  latitude double [null, note: 'GPS latitude (-90 to 90)']
+  longitude double [null, note: 'GPS longitude (-180 to 180)']
+  geometry_wkt varchar [null, note: 'WKT point geometry: POINT(lon lat) for spatial queries']
 
-  is_location_padding boolean [not null]
-  location_index int [not null]
+  // === COURSE POSITION ===
+  hole_number int [null, note: 'Current hole (1-9 for 9-hole, 1-18 for 18-hole, 1-9 repeated for 27-hole)']
+  section_number int [null, note: 'Global section number (1-24 for 9-hole, 1-54 for 18-hole, 1-80 for 27-hole)']
+  hole_section int [null, note: 'Section within current hole (typically 1-3: tee, fairway, green)']
+  nine_number int [null, note: 'Which nine: 1=front, 2=back, 3=third (derived from topology or section ranges)']
 
-  hole_number int [null]
-  section_number int [null]
-  hole_section int [null]
-  nine_number int [null]
+  // === PACE METRICS ===
+  pace double [null, note: 'Pace value in minutes at this position']
+  pace_gap double [null, note: 'Gap to expected pace (negative = ahead, positive = behind)']
+  positional_gap double [null, note: 'Gap to group ahead in minutes']
 
-  latitude double [null]
-  longitude double [null]
+  // === DEVICE HEALTH ===
+  device varchar [null, note: 'Device identifier (MongoDB ObjectId)']
+  battery_percentage double [null, note: 'Device battery level (0-100)']
+  is_cache boolean [null, note: 'True if GPS fix was cached (weak signal area)']
+  is_projected boolean [null, note: 'True if position was estimated/interpolated']
+  is_problem boolean [null, note: 'True if device reported a problem state']
 
-  pace double [null]
-  pace_gap double [null]
-  positional_gap double [null]
+  // === DATA QUALITY FLAGS ===
+  is_location_padding boolean [not null, note: 'True = placeholder row where hole_number AND section_number are NULL']
 
-  battery_percentage double [null]
-  is_cache boolean [null]
-  is_projected boolean [null]
-  is_problem boolean [null]
+  // === ROUND-LEVEL CONTEXT (denormalized) ===
+  round_start_time timestamp [null, note: 'Round start timestamp (from startTime field)']
+  round_end_time timestamp [null, note: 'Round end timestamp (from endTime field)']
+  round_duration_minutes double [null, note: 'Computed: (round_end_time - round_start_time) / 60']
+  start_hole int [null, note: 'Starting hole (1 = normal start, other = shotgun start)']
+  start_section int [null, note: 'Starting section number']
+  end_section int [null, note: 'Ending section number']
+  is_nine_hole boolean [null, note: 'True if 9-hole round, False if 18-hole round']
+  is_complete boolean [null, note: 'True if round was marked complete']
+  goal_time int [null, note: 'Target round time in seconds (e.g., 6720 = 112 min for 9-hole)']
+  goal_name varchar [null, note: 'Goal profile name (e.g., Default)']
+  goal_time_fraction double [null, note: 'Fraction of goal time (typically 1.0)']
 
-  // Round-level fields repeated on each row
-  round_start_time timestamp [null]
-  round_end_time timestamp [null]
-  start_hole int [null]
-  start_section int [null]
-  end_section int [null]
-  is_nine_hole boolean [null]
-  current_nine int [null]
-  goal_time int [null]
-  is_complete boolean [null]
-  device varchar [null]
+  // === ADDITIONAL ROUND METADATA ===
+  current_nine int [null, note: 'Current nine from source (player selection, not physical location)']
+  current_section int [null, note: 'Current section at round snapshot time']
+  current_hole int [null, note: 'Current hole at round snapshot time']
+  current_hole_section int [null, note: 'Current hole section at round snapshot time']
+  first_fix varchar [null, note: 'First GPS fix ObjectId reference']
+  last_fix varchar [null, note: 'Last GPS fix ObjectId reference']
+  last_section_start double [null, note: 'Last section start time offset']
+  is_incomplete boolean [null, note: 'True if round was marked incomplete']
+  is_secondary boolean [null, note: 'True if secondary/backup device']
+  is_auto_assigned boolean [null, note: 'True if device was auto-assigned']
 
-  Note: 'No single event_id exists. Effective uniqueness after dedup is (round_id, location_index, fix_timestamp) where fix_timestamp may be NULL.'
-}
+  // === DATE ENRICHMENT (computed from fix_timestamp) ===
+  event_date date [null, note: 'Date part of fix_timestamp for partitioning']
+  event_year int [null, note: 'Year from fix_timestamp']
+  event_month int [null, note: 'Month from fix_timestamp (1-12)']
+  event_day int [null, note: 'Day of month from fix_timestamp (1-31)']
+  event_weekday int [null, note: 'Day of week (1=Sunday, 7=Saturday in Spark)']
 
-Table silver_dim_facility_topology {
-  facility_id varchar [not null]
-  unit_id int [not null]
-  unit_name varchar [null]
-  nine_number int [null]
-  section_start int [null]
-  section_end int [null]
-}
-
-Table silver_dim_course_profile {
-  course_id varchar [not null]
-  course_type varchar [null]
-  volume_profile varchar [null]
-  peak_season_start_month int [null]
-  peak_season_end_month int [null]
-  notes varchar [null]
-  source varchar [null]
-}
-
-Ref: silver_fact_telemetry_event.course_id > silver_dim_course_profile.course_id
-
-// Topology is technically a range join on section_number; Gold commonly joins by (course_id, nine_number).
-Ref: silver_fact_telemetry_event.course_id > silver_dim_facility_topology.facility_id
-
-// ---------------------------------------------------------------------------
-// B) Proposed normalized exploration model (recommended mental model / views)
-// ---------------------------------------------------------------------------
-
-Table dim_course {
-  course_id varchar [pk]
-}
-
-Table dim_device {
-  device_id varchar [pk]
-}
-
-Table dim_topology_unit {
-  course_id varchar
-  unit_id int
-  unit_name varchar
-  nine_number int
-  section_start int
-  section_end int
-}
-
-Table dim_round {
-  round_id varchar [pk]
-  course_id varchar
-  device_id varchar
-  round_start_time timestamp [null]
-  round_end_time timestamp [null]
-  start_hole int [null]
-  start_section int [null]
-  end_section int [null]
-  is_nine_hole boolean [null]
-  is_complete boolean [null]
-  goal_time int [null]
-}
-
-Table fact_telemetry_fix {
-  round_id varchar
-  location_index int
-  fix_timestamp timestamp [null]
-  is_timestamp_missing boolean
-  is_location_padding boolean
-  hole_number int [null]
-  section_number int [null]
-  hole_section int [null]
-  nine_number int [null]
-  latitude double [null]
-  longitude double [null]
-  pace double [null]
-  pace_gap double [null]
-  positional_gap double [null]
-  battery_percentage double [null]
-  is_cache boolean [null]
-  is_projected boolean [null]
-  is_problem boolean [null]
-
-  Indexes {
-    (round_id, location_index, fix_timestamp) [name: 'ix_fix_natural_key']
+  indexes {
+    (round_id, location_index) [pk, name: 'pk_round_location']
+    (course_id, event_date) [name: 'ix_partition']
   }
+
+  Note: '''
+  GRAIN: One row per GPS fix per round.
+  PARTITIONED BY: course_id, event_date (Iceberg table)
+  
+  Data flows from MongoDB exports (CSV/JSON) through Bronze landing zone,
+  then exploded from wide format (one row per round with locations array)
+  to long format (one row per GPS fix).
+  
+  Padding rows (is_location_padding=true) are preserved for completeness
+  but should typically be filtered out in analysis queries.
+  '''
 }
 
-Ref: dim_round.course_id > dim_course.course_id
-Ref: dim_round.device_id > dim_device.device_id
-Ref: fact_telemetry_fix.round_id > dim_round.round_id
-Ref: dim_topology_unit.course_id > dim_course.course_id
+// =============================================================================
+// SILVER LAYER - DIMENSION TABLES
+// =============================================================================
 
+Table dim_facility_topology {
+  facility_id varchar [not null, note: 'Course identifier (matches course_id in fact table)']
+  unit_id int [not null, note: 'Sequential nine identifier (1, 2, or 3)']
+  unit_name varchar [null, note: 'Human-readable name (e.g., Front Nine, Back Nine, Course)']
+  nine_number int [null, note: 'Which nine this unit represents (same as unit_id)']
+  section_start int [null, note: 'First section number in this nine']
+  section_end int [null, note: 'Last section number in this nine']
 
+  indexes {
+    (facility_id, unit_id) [pk]
+  }
+
+  Note: '''
+  GRAIN: One row per nine per facility.
+  SOURCE: Seeded from pipeline/silver/seeds/dim_facility_topology.csv
+  
+  Maps section number ranges to nines for proper nine_number derivation.
+  
+  Examples:
+  - americanfalls: 1 nine (sections 1-24) - 9-hole loop course
+  - bradshawfarmgc: 3 nines (1-27, 28-54, 55-80) - 27-hole facility
+  - erinhills: 2 nines (1-27, 29-55) - 18-hole course
+  '''
+}
+
+Table dim_course_profile {
+  course_id varchar [pk, not null, note: 'Course identifier (matches course_id in fact table)']
+  course_type varchar [null, note: 'Course type description (e.g., 9-hole loop facility, 27-hole facility)']
+  is_loop_course boolean [null, note: 'True if 9-hole course that supports 18-hole rounds via loop replay']
+  volume_profile varchar [null, note: 'Volume category: high, medium, low, unknown']
+  peak_season_start_month int [null, note: 'Peak season start month (1-12)']
+  peak_season_end_month int [null, note: 'Peak season end month (1-12)']
+  notes varchar [null, note: 'Human-entered notes about the course']
+  source varchar [null, note: 'Data source (manual, inferred, etc.)']
+
+  Note: '''
+  GRAIN: One row per course.
+  SOURCE: Seeded from pipeline/silver/seeds/dim_course_profile.csv
+  
+  Human-entered metadata about course configuration and characteristics.
+  Used for filtering (e.g., loop courses in pace analysis) and display.
+  '''
+}
+
+Table dim_sections_per_hole {
+  course_id varchar [not null, note: 'Course identifier']
+  hole_number int [not null, note: 'Hole number (1-9 or 1-18)']
+  section_start int [null, note: 'First section number for this hole']
+  section_end int [null, note: 'Last section number for this hole']
+  sections_count int [null, note: 'Number of distinct sections observed on this hole']
+
+  indexes {
+    (course_id, hole_number) [pk]
+  }
+
+  Note: '''
+  GRAIN: One row per hole per course.
+  SOURCE: Generated from fact_telemetry_event by scripts/generate_sections_per_hole.py
+  
+  Maps hole numbers to their section ranges based on observed telemetry data.
+  Useful for understanding course topology at the hole level.
+  '''
+}
+
+// =============================================================================
+// RELATIONSHIPS
+// =============================================================================
+
+Ref: fact_telemetry_event.course_id > dim_facility_topology.facility_id
+Ref: fact_telemetry_event.course_id > dim_course_profile.course_id
+Ref: fact_telemetry_event.course_id > dim_sections_per_hole.course_id
+
+// =============================================================================
+// GOLD LAYER - AGGREGATED MODELS (dbt)
+// =============================================================================
+// These are built by dbt from the Silver layer for reporting.
+
+Table gold_pace_summary_by_round {
+  round_id varchar [pk]
+  course_id varchar [not null]
+  round_date date [null]
+  round_duration_minutes double [null]
+  is_nine_hole boolean [null]
+  is_complete boolean [null]
+  
+  // Aggregated metrics
+  event_count int [null, note: 'Total GPS fixes in round']
+  real_event_count int [null, note: 'Non-padding GPS fixes']
+  avg_pace double [null, note: 'Average pace across all fixes']
+  avg_pace_gap double [null, note: 'Average pace gap']
+  max_hole_reached int [null, note: 'Highest hole number visited']
+  max_section_reached int [null, note: 'Highest section number visited']
+
+  Note: 'Roll-up of telemetry to round grain for pace analysis'
+}
+
+Table gold_data_quality_overview {
+  course_id varchar [pk]
+  total_rounds int [null]
+  total_events int [null]
+  real_events int [null, note: 'Non-padding events']
+  
+  // Completeness percentages
+  pace_completeness_pct double [null]
+  gps_completeness_pct double [null]
+  timestamp_completeness_pct double [null]
+  padding_pct double [null]
+  
+  // Quality score
+  data_quality_score double [null, note: '0-100 composite score']
+
+  Note: 'Course-level data quality metrics for monitoring'
+}
+
+Ref: gold_pace_summary_by_round.course_id > dim_course_profile.course_id
+Ref: gold_data_quality_overview.course_id > dim_course_profile.course_id

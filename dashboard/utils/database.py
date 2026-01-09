@@ -4,7 +4,6 @@ import os
 import streamlit as st
 import pandas as pd
 from trino.dbapi import connect
-from trino.auth import BasicAuthentication
 
 
 def get_trino_connection():
@@ -64,6 +63,6 @@ def test_connection() -> bool:
         cursor.fetchall()
         conn.close()
         return True
-    except Exception as e:
-        st.error(f"Failed to connect to Trino: {e}")
+    except Exception:
+        # Let the caller decide how to surface the error in the UI.
         return False

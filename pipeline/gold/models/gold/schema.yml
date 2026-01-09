@@ -1,21 +1,61 @@
 version: 2
 
 models:
+  - name: fact_rounds
+    description: >
+      Canonical round fact table (one row per course_id + round_id) built from Silver telemetry.
+      This is the preferred upstream for other Gold models so we don't repeatedly scan fix-grain telemetry.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [course_id, round_id]
+    columns:
+      - name: course_id
+        tests: [not_null]
+      - name: round_id
+        tests: [not_null]
+      - name: duration_sec
+        tests:
+          - non_negative
+      - name: projected_rate
+        tests:
+          - between_0_and_100
+      - name: problem_rate
+        tests:
+          - between_0_and_100
+      - name: cached_rate
+        tests:
+          - between_0_and_100
+      - name: ts_missing_rate
+        tests:
+          - between_0_and_100
+
   - name: pace_summary_by_round
-    description: "Round-level pace summary computed from Silver telemetry."
+    description: "Round-level pace summary derived from `gold.fact_rounds`."
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [course_id, round_id]
     columns:
       - name: round_id
         tests: [not_null]
       - name: course_id
         tests: [not_null]
+      - name: fix_count
+        tests: [non_negative]
 
   - name: signal_quality_rounds
-    description: "Signal quality rates per round based on projected/problem flags."
+    description: "Signal quality rates per round (projected/problem) derived from `gold.fact_rounds`."
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [course_id, round_id]
     columns:
       - name: round_id
         tests: [not_null]
       - name: course_id
         tests: [not_null]
+      - name: projected_rate
+        tests: [between_0_and_100]
+      - name: problem_rate
+        tests: [between_0_and_100]
 
   - name: device_health_errors
     description: "Simple battery-based device health flags derived from telemetry."
@@ -24,6 +64,14 @@ models:
         tests: [not_null]
       - name: course_id
         tests: [not_null]
+
+  - name: dim_course
+    description: >
+      Course dimension that stitches together configuration, data quality, completeness,
+      and observed round ranges. Intended as the main "course info" table for dashboards.
+    columns:
+      - name: course_id
+        tests: [not_null, unique]
 
   - name: data_quality_overview
     description: >
@@ -36,6 +84,7 @@ models:
         tests: [not_null, unique]
       - name: data_quality_score
         description: "0-100 score (higher = better data quality)"
+        tests: [between_0_and_100]
 
   - name: course_configuration_analysis
     description: >
@@ -46,6 +95,16 @@ models:
         tests: [not_null, unique]
       - name: likely_course_type
         description: "Detected course type: 9-hole, 18-hole, or 27-hole"
+      - name: pct_complete
+        tests: [between_0_and_100]
+      - name: pct_incomplete
+        tests: [between_0_and_100]
+      - name: pct_nine_hole
+        tests: [between_0_and_100]
+      - name: pct_full_rounds
+        tests: [between_0_and_100]
+      - name: pct_shotgun_starts
+        tests: [between_0_and_100]
 
   - name: critical_column_gaps
     description: >
@@ -62,6 +121,9 @@ models:
       The most critical analytical table. Granular performance metrics
       aggregated at the hole level (Round + Hole).
       Enriched with topology data (Unit Name) to differentiate loops.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [course_id, round_id, hole_number, nine_number]
     columns:
       - name: course_id
         tests: [not_null]
@@ -78,8 +140,8 @@ models:
         description: "Average seconds relative to goal (positive = slow)"
       - name: avg_pace_gap_sec
         description: "Average spacing to group ahead (seconds)"
-      - name: usability_score
-        description: "Weighted score based on data completeness in critical columns"
+      - name: duration_sec
+        tests: [non_negative]
 
   - name: course_rounds_by_month
     description: >
@@ -96,8 +158,13 @@ models:
       - name: month_number
       - name: month_name
       - name: rounds
+        tests: [non_negative]
       - name: pct_total
         description: "Share of the course’s total rounds that occurred in this month (0–100)."
+        tests: [between_0_and_100]
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [course_id, month_start]
 
   - name: course_rounds_by_weekday
     description: >
@@ -113,6 +180,27 @@ models:
         tests: [not_null]
       - name: weekday_name
       - name: rounds
+        tests: [non_negative]
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [course_id, weekday_number]
+
+  - name: course_start_hole_distribution
+    description: >
+      Start hole distribution per course. Useful for detecting shotgun starts and validating
+      configured start_section vs observed first tee section numbers.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [course_id, start_hole]
+    columns:
+      - name: course_id
+        tests: [not_null]
+      - name: start_hole
+        tests: [not_null]
+      - name: pct_rounds_with_this_start
+        tests: [between_0_and_100]
+      - name: pct_complete_rounds_with_this_start
+        tests: [between_0_and_100]
 
   - name: telemetry_completeness_summary
     description: >
@@ -135,10 +223,13 @@ models:
         description: "Rows where is_timestamp_missing = TRUE AND is_location_padding = FALSE."
       - name: pct_padding_total
         description: "Percentage of total_rows that are padding_rows (0–100)."
+        tests: [between_0_and_100]
       - name: pct_ts_missing_total
         description: "Percentage of total_rows with missing timestamps (0–100)."
+        tests: [between_0_and_100]
       - name: pct_ts_missing_non_padding
         description: "Percentage of non_padding_rows with missing timestamps (0–100)."
+        tests: [between_0_and_100]
 
   - name: gold_coverage_audit
     description: >

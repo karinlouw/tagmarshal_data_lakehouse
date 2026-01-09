@@ -1,26 +1,22 @@
-with base as (
-  select
-    course_id,
-    round_id,
-    min(fix_timestamp) as round_start_ts,
-    max(fix_timestamp) as round_end_ts,
-    count(*) as fix_count,
-    avg(pace) as avg_pace,
-    avg(pace_gap) as avg_pace_gap,
-    avg(positional_gap) as avg_positional_gap
-  from {{ source('silver', 'fact_telemetry_event') }}
-  where is_location_padding = false
-  group by course_id, round_id
-)
-select
+-- pace_summary_by_round.sql
+-- -----------------------------------------------------------------------------
+-- Grain: one row per (course_id, round_id)
+-- Purpose:
+--   Lightweight pace summary for dashboards. This is intentionally derived from
+--   `gold.fact_rounds` to avoid re-scanning fix-grain telemetry.
+-- -----------------------------------------------------------------------------
+
+{{ config(materialized='table') }}
+
+SELECT
   course_id,
   round_id,
   round_start_ts,
   round_end_ts,
   fix_count,
-  avg_pace,
-  avg_pace_gap,
-  avg_positional_gap
-from base
+  avg_pace_sec           AS avg_pace,
+  avg_pace_gap_sec       AS avg_pace_gap,
+  avg_positional_gap     AS avg_positional_gap
+FROM {{ ref('fact_rounds') }}
 
 

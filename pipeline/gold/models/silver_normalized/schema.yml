@@ -1,14 +1,6 @@
 version: 2
 
 models:
-  - name: dim_course
-    description: >
-      Normalized course dimension for exploration. Anchors on course_ids observed
-      in Silver telemetry and optionally enriches from dim_course_profile.
-    columns:
-      - name: course_id
-        tests: [not_null, unique]
-
   - name: dim_device
     description: >
       Normalized device dimension for exploration. One row per device_id with

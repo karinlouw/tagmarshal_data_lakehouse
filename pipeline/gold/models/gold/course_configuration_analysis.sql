@@ -5,26 +5,20 @@
 {{ config(materialized='table') }}
 
 WITH round_configs AS (
+    -- Derive per-round configuration from `gold.fact_rounds` (already filtered to non-padding rows).
+    -- This avoids scanning fix-grain telemetry a second time.
     SELECT
         course_id,
         round_id,
-        -- Round configuration
         start_hole,
         is_nine_hole,
         is_complete,
-        -- Derived from location data
-        MIN(section_number) AS min_section,
-        MAX(section_number) AS max_section,
-        MIN(nine_number) AS min_nine,
-        MAX(nine_number) AS max_nine,
-        COUNT(DISTINCT hole_number) AS unique_holes_played,
-        COUNT(DISTINCT nine_number) AS nines_played,
-        COUNT(*) AS location_count
-    FROM {{ source('silver', 'fact_telemetry_event') }}
-    WHERE is_location_padding = FALSE
-      -- Note: we do NOT require hole_number here. We want to keep rounds/events
-      -- even when hole assignment is missing, so totals reflect the full dataset.
-    GROUP BY course_id, round_id, start_hole, is_nine_hole, is_complete
+        min_section_number AS min_section,
+        max_section_number AS max_section,
+        holes_played AS unique_holes_played,
+        nines_played,
+        fix_count AS location_count
+    FROM {{ ref('fact_rounds') }}
 ),
 
 course_summary AS (

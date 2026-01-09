@@ -102,6 +102,9 @@ services:
       dockerfile: Dockerfile
     image: tagmarshal-spark:3.5.0
     container_name: spark
+    env_file:
+      - config/base.env
+      - config/local.env
     environment:
       SPARK_MASTER_HOST: spark
       SPARK_NO_DAEMONIZE: "true"
@@ -126,6 +129,9 @@ services:
     container_name: spark-worker
     depends_on:
       - spark
+    env_file:
+      - config/base.env
+      - config/local.env
     environment:
       SPARK_NO_DAEMONIZE: "true"
     entrypoint: /bin/bash
@@ -187,6 +193,8 @@ services:
       # Airflow core config
       AIRFLOW__CORE__EXECUTOR: LocalExecutor # Runs tasks in same container
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${TM_POSTGRES_USER:-airflow}:${TM_POSTGRES_PASSWORD:-airflow}@postgres:5432/${TM_POSTGRES_DB:-airflow}
+      # Ensure PostgresHook(postgres_conn_id="postgres_default") points at our airflow DB
+      AIRFLOW_CONN_POSTGRES_DEFAULT: postgresql://airflow:airflow@postgres:5432/airflow
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
       AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
